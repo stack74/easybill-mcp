@@ -1,0 +1,61 @@
+{
+  "name": "easybill-mcp",
+  "version": "1.0.1",
+  "description": "MCP server for the easybill REST API (invoices, customers, articles, payments, time tracking)",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "easybill-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc && chmod +x dist/index.js",
+    "prepare": "npm run build",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test test/format.test.mjs test/client.test.mjs test/rate-limit.test.mjs test/server.test.mjs",
+    "test:live": "npm run build && node --env-file=.env --test test/live.test.mjs",
+    "test:all": "npm run test && npm run test:live",
+    "smoke": "node --env-file=.env dist/index.js --selftest",
+    "inspect": "npx @modelcontextprotocol/inspector node --env-file=.env dist/index.js",
+    "clean": "rm -rf dist"
+  },
+  "keywords": [
+    "mcp",
+    "modelcontextprotocol",
+    "model-context-protocol",
+    "claude",
+    "easybill",
+    "invoice",
+    "invoicing",
+    "accounting",
+    "buchhaltung"
+  ],
+  "author": "stack74",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stack74/easybill-mcp.git"
+  },
+  "homepage": "https://github.com/stack74/easybill-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/stack74/easybill-mcp/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
