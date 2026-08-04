@@ -1,7 +1,9 @@
 # easybill MCP Server
 
 An [MCP](https://modelcontextprotocol.io) server for the [easybill REST API](https://www.easybill.de/api/).
-Gives Claude access to your invoices, customers, article catalogue, payments, projects and tracked time.
+Gives any MCP-capable assistant — Claude Code, Claude Desktop, Cursor, VS Code, Windsurf, Zed,
+Codex CLI, Gemini CLI, Cline — access to your invoices, customers, article catalogue, payments,
+projects and tracked time.
 
 Built on the official [`@modelcontextprotocol/sdk`](https://github.com/modelcontextprotocol/typescript-sdk)
 (TypeScript), talking stdio.
@@ -22,7 +24,172 @@ Built on the official [`@modelcontextprotocol/sdk`](https://github.com/modelcont
 
 In easybill: **Einstellungen → App-Center → API**. Create a key and copy it.
 
-### 2. Build
+### 2. Register it with your client
+
+This is a plain stdio MCP server published on npm, so any MCP client can run it with `npx` —
+no clone, no build, no global install:
+
+```bash
+npx -y easybill-mcp
+```
+
+Configuration is entirely through environment variables (full list under
+[Configuration](#configuration)). Two matter now:
+
+- Leave `EASYBILL_ENABLE_WRITES` unset to start **read-only**.
+- Set `EASYBILL_RATE_LIMIT_PER_MINUTE` to **10** on easybill's PLUS plan or **60** on BUSINESS.
+
+Most clients use the same JSON shape under an `mcpServers` key:
+
+```json
+{
+  "mcpServers": {
+    "easybill": {
+      "command": "npx",
+      "args": ["-y", "easybill-mcp"],
+      "env": {
+        "EASYBILL_API_KEY": "your_api_key_here",
+        "EASYBILL_RATE_LIMIT_PER_MINUTE": "10"
+      }
+    }
+  }
+}
+```
+
+Where that block goes:
+
+| Client | Config location |
+|---|---|
+| **Claude Desktop** | Settings → Developer → Edit Config, or `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) · `%APPDATA%\Claude\claude_desktop_config.json` (Windows) |
+| **Cursor** | `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (per project) |
+| **Windsurf** | `~/.codeium/windsurf/mcp_config.json` |
+| **Cline / Roo Code** | MCP Servers panel → Configure MCP Servers (`cline_mcp_settings.json`) |
+| **Gemini CLI** | `~/.gemini/settings.json` |
+| **Claude Code** | `claude mcp add`, see below |
+| **VS Code / Copilot** | `.vscode/mcp.json`, different key — see below |
+| **Zed** | `settings.json` → `context_servers`, see below |
+| **Codex CLI** | `~/.codex/config.toml`, TOML instead of JSON — see below |
+
+> **Windows:** if a client fails to start `npx`, use `"command": "cmd"` with
+> `"args": ["/c", "npx", "-y", "easybill-mcp"]`.
+
+#### Claude Code
+
+```bash
+claude mcp add easybill \
+  --env EASYBILL_API_KEY=your_api_key_here \
+  --env EASYBILL_RATE_LIMIT_PER_MINUTE=10 \
+  -- npx -y easybill-mcp
+```
+
+`claude mcp add` does not overwrite an existing entry — to change the environment later,
+`claude mcp remove easybill -s local` first, then add it again.
+
+#### VS Code (GitHub Copilot agent mode)
+
+VS Code uses `servers`, not `mcpServers`, and can prompt for the key instead of storing it
+in the file. Put this in `.vscode/mcp.json` (workspace) or open **MCP: Open User
+Configuration**:
+
+```json
+{
+  "inputs": [
+    { "id": "easybill_key", "type": "promptString", "description": "easybill API key", "password": true }
+  ],
+  "servers": {
+    "easybill": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "easybill-mcp"],
+      "env": {
+        "EASYBILL_API_KEY": "${input:easybill_key}",
+        "EASYBILL_RATE_LIMIT_PER_MINUTE": "10"
+      }
+    }
+  }
+}
+```
+
+#### Zed
+
+In `settings.json`:
+
+```json
+{
+  "context_servers": {
+    "easybill": {
+      "source": "custom",
+      "command": "npx",
+      "args": ["-y", "easybill-mcp"],
+      "env": {
+        "EASYBILL_API_KEY": "your_api_key_here",
+        "EASYBILL_RATE_LIMIT_PER_MINUTE": "10"
+      }
+    }
+  }
+}
+```
+
+#### Codex CLI
+
+In `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.easybill]
+command = "npx"
+args = ["-y", "easybill-mcp"]
+env = { EASYBILL_API_KEY = "your_api_key_here", EASYBILL_RATE_LIMIT_PER_MINUTE = "10" }
+```
+
+#### Hosted clients that only speak remote MCP
+
+Some clients (ChatGPT connectors, hosted agent platforms) accept only HTTP/SSE endpoints, not
+stdio. Bridge it locally:
+
+```bash
+npx -y supergateway --stdio "npx -y easybill-mcp"
+```
+
+Only do this if you understand the exposure: anything that reaches that endpoint reaches your
+accounting data. Keep it bound to localhost or behind a tunnel with authentication, and never
+run the bridge with writes enabled unless the endpoint is protected.
+
+### 3. Verify the connection
+
+Ask the assistant to call `easybill_get_server_info`. It reports the mode, the limits and
+whether easybill accepted the credentials:
+
+```json
+{
+  "server_version": "1.0.1",
+  "writes_enabled": false,
+  "tools_registered": { "read_only": 28, "write": 0, "withheld_because_writes_disabled": 26 },
+  "rate_limit_per_minute": 10,
+  "connection": "ok — credentials accepted by easybill"
+}
+```
+
+### 4. Enable writes, once you trust it
+
+Add `EASYBILL_ENABLE_WRITES=true` to the server's environment:
+
+```bash
+claude mcp add easybill \
+  --env EASYBILL_API_KEY=your_api_key_here \
+  --env EASYBILL_RATE_LIMIT_PER_MINUTE=10 \
+  --env EASYBILL_ENABLE_WRITES=true \
+  -- npx -y easybill-mcp
+```
+
+The 26 write tools are registered at startup, so the change only takes effect once the client
+restarts the server process — editing the config in a running session is not enough. Confirm
+with `easybill_get_server_info`: `writes_enabled` must read `true`.
+
+---
+
+## Running from a local clone
+
+For development, or to run a version you have not published:
 
 ```bash
 git clone https://github.com/stack74/easybill-mcp.git
@@ -31,7 +198,16 @@ npm install
 npm run build
 ```
 
-### 3. Test locally first
+Then point the client at the built entry point instead of `npx` — `"command": "node"`,
+`"args": ["/absolute/path/to/easybill-mcp/dist/index.js"]`, same `env` block. Or straight from
+GitHub without cloning, which is slower because it compiles TypeScript on install via the
+`prepare` script and needs a toolchain:
+
+```bash
+npx -y github:stack74/easybill-mcp
+```
+
+### Test locally first
 
 Copy `.env.example` to `.env`, put your key in it, then run the read-only self-test:
 
@@ -69,70 +245,7 @@ npm run inspect     # MCP Inspector, loads .env
 
 > **Note:** `.env` is only read by these npm scripts, via Node's `--env-file`. The server
 > itself reads plain environment variables — when you register it with an MCP client, pass
-> the key through the client's config as shown below, not via `.env`.
-
-### 4. Register with Claude Code
-
-Read-only (recommended to start):
-
-```bash
-claude mcp add easybill \
-  --env EASYBILL_API_KEY=your_api_key_here \
-  --env EASYBILL_RATE_LIMIT_PER_MINUTE=10 \
-  -- node /absolute/path/to/easybill-mcp/dist/index.js
-```
-
-With write access, once you trust it:
-
-```bash
-claude mcp add easybill \
-  --env EASYBILL_API_KEY=your_api_key_here \
-  --env EASYBILL_RATE_LIMIT_PER_MINUTE=10 \
-  --env EASYBILL_ENABLE_WRITES=true \
-  -- node /absolute/path/to/easybill-mcp/dist/index.js
-```
-
-Set `EASYBILL_RATE_LIMIT_PER_MINUTE` to **10** on the PLUS plan or **60** on BUSINESS.
-
-Verify it connected:
-
-```
-> use easybill_get_server_info
-```
-
-### 5. Claude Desktop (alternative)
-
-Add to `claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "easybill": {
-      "command": "node",
-      "args": ["/absolute/path/to/easybill-mcp/dist/index.js"],
-      "env": {
-        "EASYBILL_API_KEY": "your_api_key_here",
-        "EASYBILL_RATE_LIMIT_PER_MINUTE": "10"
-      }
-    }
-  }
-}
-```
-
-### Installing without cloning
-
-Once published to npm, no clone or build is needed — `npx` fetches and runs it:
-
-```bash
-claude mcp add easybill --env EASYBILL_API_KEY=your_key -- npx -y easybill-mcp
-```
-
-Straight from GitHub also works, but is slower (it compiles TypeScript on install
-via the `prepare` script) and needs a toolchain:
-
-```bash
-claude mcp add easybill --env EASYBILL_API_KEY=your_key -- npx -y github:stack74/easybill-mcp
-```
+> the key through the client's config, not via `.env`.
 
 ### Publishing to npm
 
