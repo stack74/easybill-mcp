@@ -22,9 +22,15 @@ export interface EasybillList<T> {
 
 export type Record_ = Record<string, unknown>;
 
+/** Content blocks a tool can return: text, an image, or an embedded file. */
+export type ToolContent =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string }
+  | { type: "resource"; resource: { uri: string; mimeType: string; blob: string } };
+
 /** An MCP tool result. */
 export interface ToolResult {
-  content: { type: "text"; text: string }[];
+  content: ToolContent[];
   structuredContent?: Record_;
   isError?: boolean;
 }

@@ -13,6 +13,7 @@ import {
   buildListResponse,
 } from "../services/format.js";
 import { registerCrudTools } from "./crud.js";
+import { deliverFile, downloadNote, downloadShape } from "./files-io.js";
 import { registerRead } from "./registry.js";
 
 export function registerFileTools(server: McpServer, client: ApiClient): void {
@@ -39,47 +40,23 @@ export function registerFileTools(server: McpServer, client: ApiClient): void {
       name: "easybill_download_attachment",
       title: "Download attachment",
       description:
-        "Download an attachment's file content and save it to a local path.\n\n" +
-        "Returns the saved file path and size in bytes. The content is NOT loaded into the " +
-        "conversation, so this is safe for large files.\n" +
+        "Download an attachment's file content.\n\n" +
+        `${downloadNote(server)}\n` +
         "Find attachment IDs with easybill_list_attachments.",
       inputSchema: {
         id: idSchema("attachment to download"),
-        output_path: z
-          .string()
-          .min(1)
-          .describe(
-            "Absolute path to write the file to, e.g. '/Users/me/Desktop/receipt.pdf'. Parent directory must exist.",
-          ),
+        ...downloadShape(server, "/Users/me/Desktop/receipt.pdf"),
       },
     },
     async (args): Promise<ToolResult> => {
-      const outputPath = args.output_path as string;
       const binary = await client.requestBinary(`/attachments/${String(args.id)}/content`, {
         accept: "*/*",
       });
-
-      const { writeFile } = await import("node:fs/promises");
-      await writeFile(outputPath, binary.data);
-
-      const output = {
-        saved_to: outputPath,
-        bytes: binary.data.byteLength,
-        content_type: binary.contentType,
-        attachment_id: args.id,
-        ...(binary.fileName ? { original_file_name: binary.fileName } : {}),
-      };
-      return {
-        content: [
-          {
-            type: "text",
-            text:
-              `Saved attachment ${String(args.id)} to ${outputPath} ` +
-              `(${binary.data.byteLength.toLocaleString("en-US")} bytes, ${binary.contentType}).`,
-          },
-        ],
-        structuredContent: output,
-      };
+      return deliverFile(server, args, binary, {
+        label: `Attachment ${String(args.id)}`,
+        fileName: `attachment-${String(args.id)}`,
+        meta: { attachment_id: args.id },
+      });
     },
   );
 

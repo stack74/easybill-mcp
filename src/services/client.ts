@@ -323,6 +323,12 @@ export function formatApiError(error: unknown): string {
         return `Error: access denied (403) on ${path}. Your easybill plan or API key may not include this resource.${suffix}`;
       case 404:
         return `Error: not found (404) on ${path}. Verify the ID exists — list the resource first to get valid IDs.${suffix}`;
+      case 406:
+        return (
+          `Error: this format is not available (406) on ${path}.${suffix} ` +
+          `A document only exists in the e-invoice formats it was finalised with (set by the customer's ` +
+          `'document_pdf_type' and the plan). Download it as 'pdf', or check the document's versions.`
+        );
       case 409:
         return `Error: conflict (409) on ${path}.${suffix} The record may already be completed, cancelled, or referenced elsewhere.`;
       case 414:

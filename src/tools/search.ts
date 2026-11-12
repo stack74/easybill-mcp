@@ -1,19 +1,20 @@
 /**
- * Fuzzy customer lookup.
+ * Customer lookup — the first question when processing an inbound inquiry:
+ * "is this company already a customer?"
  *
- * The easybill API offers no full-text search — its customer filters match exact
- * values only. That makes "is this company already a customer?" surprisingly hard,
- * which is the first question to answer when processing an inbound inquiry.
+ * Primary path: easybill's full-text search (GET /customers/search, API 1.102),
+ * one request, covering archived contacts too. Its results come sorted by
+ * customer number, so they are re-ranked locally by how well they match.
  *
- * This tool bridges the gap: it tries cheap exact filters first, then falls back to
- * paging the customer list and scoring candidates locally.
+ * Fallback, for accounts where the search endpoint is not available: cheap exact
+ * filters, then paging the customer list and scoring candidates locally.
  */
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { SUMMARY_FIELDS } from "../constants.js";
 import { responseFormatSchema } from "../schemas/common.js";
-import type { ApiClient } from "../services/client.js";
+import { type ApiClient, EasybillApiError } from "../services/client.js";
 import {
   type EasybillList,
   type Record_,
@@ -94,22 +95,23 @@ export function registerSearchTools(server: McpServer, client: ApiClient): void 
     server,
     {
       name: "easybill_find_customer",
-      title: "Find a customer by name, email or number (fuzzy)",
-      description: `Search for an existing customer by company name, person name, email, customer number or city.
+      title: "Find a customer or supplier by name, email or number",
+      description: `Search for an existing customer (or supplier) by company name, person name, email, customer number or city.
 
 USE THIS FIRST whenever you need to know whether someone is already a customer — for example
-before creating an offer or invoice from an inbound inquiry. The easybill API has no full-text
-search, so this tool combines exact filters with a local fuzzy match over the customer list.
+before creating an offer or invoice from an inbound inquiry. Uses easybill's full-text search
+(one request, archived contacts included) and ranks the hits by how well they match. If the
+search is unavailable it falls back to exact filters plus a local fuzzy scan of the list.
 
-It tolerates the differences that break exact matching: legal forms ('GmbH & Co. KG'),
-punctuation ('M.B. MUSTERMANN' vs 'MB Mustermann'), umlauts, and word order.
+Matching tolerates legal forms ('GmbH & Co. KG'), punctuation ('M.B. MUSTERMANN' vs
+'MB Mustermann'), umlauts, and word order.
 
 Args:
   - query (string): what to search for. A company name, surname, email or customer number.
+  - contact_type ('CUSTOMER'|'SUPPLIER'): restrict to customers or suppliers. Omit for both.
   - limit (number): max candidates to return, 1-25 (default 5).
-  - min_score (number): 0-1 match threshold (default 0.5). Lower it to cast a wider net.
-  - max_pages (number): how many pages of 1000 customers to scan in the fallback (default 3).
-    Each page is one API request, so keep this low on a plan with a 10 req/min limit.
+  - min_score (number): 0-1 match threshold for the fuzzy fallback (default 0.5).
+  - max_pages (number): pages of 1000 customers to scan in the fallback (default 3).
 
 Returns: { query, match_count, exact_match (boolean), candidates[] } where each candidate has
 its easybill 'id', 'match_score' (1 = certain) and the usual summary fields.
@@ -130,6 +132,10 @@ Examples:
           .min(2, "Query must be at least 2 characters")
           .max(200)
           .describe("Company name, person name, email address, customer number or city."),
+        contact_type: z
+          .enum(["CUSTOMER", "SUPPLIER"])
+          .optional()
+          .describe("Only customers or only suppliers. Omit to search both."),
         limit: z.number().int().min(1).max(25).default(5).describe("Max candidates to return."),
         min_score: z
           .number()
@@ -155,6 +161,37 @@ Examples:
       const format = (args.response_format as ResponseFormat | undefined) ?? "markdown";
 
       const queryTokens = tokenize(query);
+      const contactType = args.contact_type as string | undefined;
+
+      // --- Full-text search: one request ---
+      try {
+        const found = await client.request<EasybillList<Record_>>("/customers/search", {
+          query: { query, limit: 100, ...(contactType ? { contactType } : {}) },
+        });
+        const ranked = (found?.items ?? [])
+          .map((customer) => ({ customer, value: score(customer, queryTokens, query) }))
+          .sort((a, b) => b.value - a.value);
+        const candidates = ranked.slice(0, limit).map(({ customer, value }) => ({
+          ...selectFields(customer, SUMMARY_FIELDS.customer),
+          match_score: Math.round(value * 100) / 100,
+          matched_by: "full-text search",
+        }));
+        const certain = candidates.filter((c) => c.match_score === 1).length === 1 && candidates[0]?.match_score === 1;
+        const total = found?.total ?? ranked.length;
+        return render(
+          query,
+          candidates,
+          certain,
+          format,
+          `easybill full-text search, ${total} hit(s)${total > limit ? `, best ${candidates.length} shown` : ""}`,
+        );
+      } catch (error) {
+        // Older API or no permission for the search endpoint: use the fallback below.
+        const unavailable = error instanceof EasybillApiError && [400, 403, 404, 405].includes(error.status);
+        if (!unavailable) throw error;
+      }
+
+      // --- Fallback: exact filters, then a local fuzzy scan ---
       const looksLikeEmail = query.includes("@");
       const looksLikeNumber = /^\d+$/.test(query);
 
@@ -166,7 +203,7 @@ Examples:
 
       for (const attempt of exactAttempts) {
         const hit = await client.request<EasybillList<Record_>>("/customers", {
-          query: { [attempt.field]: attempt.value, limit: limit },
+          query: { [attempt.field]: attempt.value, limit: limit, ...(contactType ? { contactType } : {}) },
         });
         const items = hit?.items ?? [];
         if (items.length > 0) {
@@ -186,7 +223,7 @@ Examples:
 
       for (let page = 1; page <= maxPages; page++) {
         const list = await client.request<EasybillList<Record_>>("/customers", {
-          query: { limit: 1000, page },
+          query: { limit: 1000, page, ...(contactType ? { contactType } : {}) },
         });
         pagesScanned++;
         totalCustomers = list?.total ?? 0;

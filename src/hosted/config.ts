@@ -31,6 +31,7 @@ const RESOURCE_SCOPES = [
   "time-tracking",
   "attachment",
   "text-template",
+  "incoming-document",
 ] as const;
 /** Read-only resources: no write scope exists or none is needed. */
 const READ_ONLY_SCOPES = ["pdf-templates.readonly", "login.readonly"] as const;

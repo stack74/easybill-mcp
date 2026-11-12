@@ -14,6 +14,7 @@ import { registerCustomerTools } from "./tools/customers.js";
 import { registerDocumentTools } from "./tools/documents.js";
 import { registerFileTools } from "./tools/files.js";
 import { registerFinanceTools } from "./tools/finance.js";
+import { registerIncomingDocumentTools } from "./tools/incoming.js";
 import { registerMetaTools } from "./tools/meta.js";
 import { type ServerContext, setServerContext } from "./tools/registry.js";
 import { registerSearchTools } from "./tools/search.js";
@@ -58,6 +59,7 @@ export function createEasybillServer(
   registerFinanceTools(server, client);
   registerWorkTools(server, client);
   registerFileTools(server, client);
+  registerIncomingDocumentTools(server, client);
   registerMetaTools(server, client);
 
   return { server, context };

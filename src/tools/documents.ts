@@ -12,7 +12,7 @@ import {
   DOCUMENT_TYPES,
   SUMMARY_FIELDS,
 } from "../constants.js";
-import { dateFilter, idSchema, multiFilter } from "../schemas/common.js";
+import { dateFilter, fieldsSchema, idSchema, multiFilter, responseFormatSchema } from "../schemas/common.js";
 import type { ApiClient } from "../services/client.js";
 import {
   type EasybillList,
@@ -23,7 +23,25 @@ import {
   buildMutationResponse,
 } from "../services/format.js";
 import { type Args, registerCrudTools } from "./crud.js";
+import { deliverFile, downloadNote, downloadShape } from "./files-io.js";
 import { registerRead, registerWrite } from "./registry.js";
+
+/**
+ * E-invoice download formats and the Accept header easybill negotiates them by.
+ * zugferd2_2 is ZUGFeRD 2.3, retired for new documents since API 1.104 but
+ * still downloadable where a document was finalised with it.
+ */
+const DOWNLOAD_ACCEPT: Record<string, string> = {
+  zugferd1: "application/pdf;format=zugferd;version=1.0.0",
+  zugferd2_2: "application/pdf;format=zugferd;version=2.2.0",
+  zugferd2_4: "application/pdf;format=zugferd;version=2.4.0",
+  zugferd2_4_extended: "application/pdf;format=zugferd_extended;version=2.4.0",
+  zugferd2_5: "application/pdf;format=zugferd;version=2.5.0",
+  zugferd2_5_extended: "application/pdf;format=zugferd_extended;version=2.5.0",
+  xrechnung2_3: "application/xml;format=xrechnung;version=2.3.0",
+  xrechnung3_0: "application/xml;format=xrechnung;version=3.0.1",
+};
+const DOWNLOAD_FORMATS = ["pdf", "jpg", ...Object.keys(DOWNLOAD_ACCEPT)] as [string, ...string[]];
 
 /**
  * The money-in-cents rule is the single most common source of wrong invoices,
@@ -99,7 +117,9 @@ export function registerDocumentTools(server: McpServer, client: ApiClient): voi
       "- Unpaid invoices: type='INVOICE', paid_at='null'\n" +
       "- Revenue in a period: type='INVOICE', document_date='2025-01-01,2025-12-31'\n" +
       "- A customer's history: customer_id=<id>\n" +
-      "- Exclude drafts: is_draft='0'   - exclude cancelled: cancel_id='null'",
+      "- Exclude drafts: is_draft='0'   - exclude cancelled: cancel_id='null'\n" +
+      "- Overdue: type='INVOICE', paid_at='null', due_date='<range ending yesterday>'\n\n" +
+      "To find a document by a word or name (customer, title, text), use easybill_search_documents.",
     bodyHint: DOCUMENT_BODY_HINT,
     createNotes: CREATE_WORKFLOW,
     deleteNotes:
@@ -133,6 +153,11 @@ export function registerDocumentTools(server: McpServer, client: ApiClient): voi
           `Filter by payment date. ${DATE_RANGE_HINT}. Use the literal string 'null' to find all UNPAID documents.`,
         ),
       edited_at: dateFilter("last edit date"),
+      due_date: dateFilter("due date"),
+      sort: z
+        .enum(["ASC", "DESC"])
+        .optional()
+        .describe("Sort by creation date: 'DESC' = newest first. Default is ASC (oldest first)."),
       cancel_id: multiFilter(
         "Filter by the ID of the cancelling document. Use the literal string 'null' for all documents that are NOT cancelled.",
       ),
@@ -292,6 +317,7 @@ export function registerDocumentTools(server: McpServer, client: ApiClient): voi
           .describe("Attach the document itself to the message."),
         document_file_type: z
           .enum([
+            "auto",
             "default",
             "zugferd1",
             "zugferd2_2",
@@ -306,7 +332,8 @@ export function registerDocumentTools(server: McpServer, client: ApiClient): voi
           ])
           .optional()
           .describe(
-            "Attachment format for e-invoicing. Omit to use the format configured on the customer.",
+            "Attachment format for e-invoicing. Omit (or 'auto') to use the format configured on the customer. " +
+              "zugferd2_2 (ZUGFeRD 2.3) is retired: it only works for documents that already contain it.",
           ),
         response_format: z.enum(["markdown", "json"]).default("markdown"),
       },
@@ -337,68 +364,71 @@ export function registerDocumentTools(server: McpServer, client: ApiClient): voi
       name: "easybill_download_document",
       title: "Download document file",
       description:
-        "Download a document as a PDF or e-invoicing file and save it to a local path.\n\n" +
-        "Supported formats: 'pdf' (plain), 'zugferd1', 'zugferd2_2' (PDF with embedded XML), " +
-        "'xrechnung2_3', 'xrechnung3_0' (XML), and 'jpg' (first page as an image).\n\n" +
-        "Returns the saved file path and its size in bytes. The file content itself is NOT loaded " +
-        "into the conversation, so this is safe for large PDFs.",
+        "Download a document as PDF, image or e-invoice file.\n\n" +
+        "Formats: 'pdf' (plain), 'jpg' (first page as an image), ZUGFeRD PDFs with embedded XML " +
+        "('zugferd2_5', 'zugferd2_5_extended', 'zugferd2_4', 'zugferd2_4_extended', 'zugferd1', and the retired " +
+        "'zugferd2_2' = ZUGFeRD 2.3 for documents finalised with it) and XRechnung XML ('xrechnung3_0', 'xrechnung2_3').\n\n" +
+        downloadNote(server),
       inputSchema: {
         id: idSchema("document to download"),
-        output_path: z
-          .string()
-          .min(1)
-          .describe(
-            "Absolute path to write the file to, e.g. '/Users/me/Desktop/invoice-123.pdf'. Parent directory must exist.",
-          ),
-        format: z
-          .enum(["pdf", "jpg", "zugferd1", "zugferd2_2", "xrechnung2_3", "xrechnung3_0"])
-          .default("pdf")
-          .describe("File format to request."),
+        ...downloadShape(server, "/Users/me/Desktop/invoice-123.pdf"),
+        format: z.enum(DOWNLOAD_FORMATS).default("pdf").describe("File format to request."),
       },
     },
     async (args): Promise<ToolResult> => {
       const requested = args.format as string;
-      const outputPath = args.output_path as string;
-
       // Plain pdf/jpg have dedicated endpoints; e-invoice formats are negotiated
       // through the Accept header on /download.
-      const acceptByFormat: Record<string, string> = {
-        zugferd1: "application/pdf;format=zugferd;version=1.0.0",
-        zugferd2_2: "application/pdf;format=zugferd;version=2.2.0",
-        xrechnung2_3: "application/xml;format=xrechnung;version=2.3.0",
-        xrechnung3_0: "application/xml;format=xrechnung;version=3.0.1",
-      };
-
       const binary =
         requested === "pdf" || requested === "jpg"
           ? await client.requestBinary(`/documents/${String(args.id)}/${requested}`, {
               accept: requested === "pdf" ? "application/pdf" : "image/jpeg",
             })
           : await client.requestBinary(`/documents/${String(args.id)}/download`, {
-              accept: acceptByFormat[requested] ?? "application/pdf",
+              accept: DOWNLOAD_ACCEPT[requested] ?? "application/pdf",
             });
+      const extension = requested === "jpg" ? "jpg" : requested.startsWith("xrechnung") ? "xml" : "pdf";
+      return deliverFile(server, args, binary, {
+        label: `Document ${String(args.id)} as ${requested}`,
+        fileName: `document-${String(args.id)}.${extension}`,
+        meta: { document_id: args.id, format: requested },
+      });
+    },
+  );
 
-      const { writeFile } = await import("node:fs/promises");
-      await writeFile(outputPath, binary.data);
-
-      const output = {
-        saved_to: outputPath,
-        bytes: binary.data.byteLength,
-        content_type: binary.contentType,
-        document_id: args.id,
-        format: requested,
-      };
-      return {
-        content: [
-          {
-            type: "text",
-            text:
-              `Saved document ${String(args.id)} as ${requested} to ${outputPath} ` +
-              `(${binary.data.byteLength.toLocaleString("en-US")} bytes, ${binary.contentType}).`,
-          },
-        ],
-        structuredContent: output,
-      };
+  registerRead(
+    server,
+    {
+      name: "easybill_search_documents",
+      title: "Search documents (full text)",
+      description:
+        "Full-text search over all documents — finds invoices, offers, credit notes etc. by a word, " +
+        "customer name, document number, title or text, without knowing exact values.\n\n" +
+        "Use this for questions like 'the offer we sent about the website relaunch' or 'invoices for Müller'. " +
+        "For exact filters (unpaid, date ranges, type) use easybill_list_documents instead.\n\n" +
+        "Costs one request. Returns: { total, count, page, pages, has_more, next_page, items[] }. 'total' counts " +
+        "search-engine matches and can exceed the visible items. Monetary values are integers in cents.",
+      inputSchema: {
+        query: z.string().min(2).max(200).describe("Search text, e.g. a customer name, keyword or document number."),
+        limit: z.number().int().min(1).max(100).default(25).describe("Items per page (default 25)."),
+        page: z.number().int().min(1).default(1).describe("Page number, starting at 1."),
+        fields: fieldsSchema,
+        response_format: responseFormatSchema,
+      },
+    },
+    async (args): Promise<ToolResult> => {
+      const list = await client.request<EasybillList<Record_>>("/documents/search", {
+        query: { query: args.query as string, limit: args.limit as number, page: args.page as number },
+      });
+      const fields = args.fields as string[] | undefined;
+      return buildListResponse({
+        list,
+        resource: "documents",
+        defaultFields: SUMMARY_FIELDS.document,
+        ...(fields ? { fields } : {}),
+        format: format(args),
+        filters: { query: args.query },
+      });
     },
   );
 

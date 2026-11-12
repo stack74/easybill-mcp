@@ -62,6 +62,14 @@ export function setServerContext(server: McpServer, context: ServerContext): voi
   contexts.set(server, context);
 }
 
+/**
+ * Hosted (multi-user) mode. Tools must then never touch the server's file
+ * system on a caller's behalf: no writing to or reading from caller-chosen paths.
+ */
+export function isHosted(server: McpServer): boolean {
+  return serverContext(server).accounts !== undefined;
+}
+
 export function serverContext(server: McpServer): ServerContext {
   let context = contexts.get(server);
   if (!context) {

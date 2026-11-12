@@ -61,6 +61,11 @@ Pick the one filtered call that answers it:
 - Real invoices only -> add \`is_draft='0'\` and \`cancel_id='null'\` to exclude drafts and
   cancelled documents
 - Unbilled work -> \`easybill_list_time_trackings\`, then keep entries where \`cleared_at\` is null
+- Overdue invoices -> \`easybill_list_documents\` with \`type='INVOICE'\`, \`paid_at='null'\` and a
+  \`due_date\` range ending yesterday
+- Newest first -> add \`sort='DESC'\` (lists are oldest first by default)
+- A document by a word, name or topic ("the offer about the relaunch") ->
+  \`easybill_search_documents\` (full text, one request)
 
 Sum money in cents and divide by 100 only when presenting the result.
 
@@ -69,6 +74,16 @@ Sum money in cents and divide by 100 only when presenting the result.
 \`easybill_create_document_payment\` with \`document_id\` and \`amount\` (in cents). This is what
 marks an invoice as paid. Partial payments are fine — easybill tracks the running total in
 the document's \`paid_amount\`.
+
+## Incoming documents (supplier invoices, Eingangsbelege)
+
+- Find: \`easybill_search_incoming_documents\` (supplier name, their invoice number) or
+  \`easybill_list_incoming_documents\` with \`sort='DESC'\` for the latest.
+- Upload: \`easybill_upload_incoming_document\`. easybill extracts the data in the background
+  (status PREPARING/PROCESSING); fetch it again later, review with the user, correct with
+  \`easybill_update_incoming_document\`, then \`easybill_complete_incoming_document\`.
+- Incoming documents use UUIDs as \`id\`, not numbers. Suppliers are contacts with
+  \`contactType='SUPPLIER'\` — \`easybill_find_customer\` with \`contact_type='SUPPLIER'\`.
 
 ## Voiding an invoice
 

@@ -1,5 +1,6 @@
 /** Customers, their contact persons, and customer groups. */
 
+import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SUMMARY_FIELDS } from "../constants.js";
 import { dateFilter, multiFilter } from "../schemas/common.js";
@@ -46,10 +47,9 @@ export function registerCustomerTools(server: McpServer, client: ApiClient): voi
     defaultFields: SUMMARY_FIELDS.customer,
     operations: ["list", "get", "create", "update", "delete"],
     listNotes:
-      "NOTE: easybill has no fuzzy full-text customer search. The filters below match exact " +
-      "values (though each accepts several comma-separated values). To find a customer by a " +
-      "partial name, filter on company_name or last_name with the exact spelling, or page " +
-      "through the list and match locally.",
+      "The filters below match exact values (each accepts several comma-separated values). " +
+      "To find a customer by a partial name, email or any word, use easybill_find_customer " +
+      "(full-text search) instead. Suppliers are contacts too: contactType='SUPPLIER'.",
     bodyHint: CUSTOMER_BODY_HINT,
     deleteNotes:
       "Deleting a customer does not delete their documents, but those documents keep only " +
@@ -65,6 +65,14 @@ export function registerCustomerTools(server: McpServer, client: ApiClient): voi
       group_id: multiFilter("Filter by customer group ID."),
       additional_group_id: multiFilter("Filter by an additional customer group ID."),
       created_at: dateFilter("creation date"),
+      contactType: z
+        .enum(["CUSTOMER", "SUPPLIER"])
+        .optional()
+        .describe("Only customers or only suppliers. Omit for both."),
+      sort: z
+        .enum(["ASC", "DESC"])
+        .optional()
+        .describe("Sort by creation date: 'DESC' = newest first. Default is ASC."),
     },
   });
 

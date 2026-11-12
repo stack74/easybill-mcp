@@ -8,7 +8,7 @@ projects and tracked time.
 Built on the official [`@modelcontextprotocol/sdk`](https://github.com/modelcontextprotocol/typescript-sdk)
 (TypeScript), talking stdio.
 
-- **54 tools** across 12 easybill resources
+- **64 tools** across 13 easybill resources (65 in hosted mode)
 - **Read-only by default** — create/update/delete tools stay unregistered unless you opt in
 - **Workflow-aware** — ships server instructions so the agent resolves the customer before
   writing a document, instead of guessing where to start
@@ -374,11 +374,12 @@ everyone; each person still connects their own easybill logins).
 
 | Tool | Access |
 |---|---|
-| `easybill_find_customer` | read — **start here**: fuzzy search by name, email or number |
+| `easybill_find_customer` | read — **start here**: search customers or suppliers by name, email or number |
 
-The easybill API has no full-text search, so this tool tries exact filters first, then pages
-the customer list and scores candidates locally. It tolerates legal forms (`GmbH & Co. KG`),
-punctuation (`M.B. MUSTERMANN` vs `MB Mustermann`), umlauts and word order.
+Uses easybill's full-text search (one request, archived contacts included) and ranks the hits
+locally, tolerating legal forms (`GmbH & Co. KG`), punctuation (`M.B. MUSTERMANN` vs
+`MB Mustermann`), umlauts and word order. If the search endpoint is unavailable it falls back to
+exact filters plus a local scan of the customer list.
 
 ### Documents — invoices, offers, credit notes, deliveries, orders
 
@@ -386,7 +387,8 @@ punctuation (`M.B. MUSTERMANN` vs `MB Mustermann`), umlauts and word order.
 |---|---|
 | `easybill_list_documents` | read |
 | `easybill_get_document` | read |
-| `easybill_download_document` | read — saves PDF / ZUGFeRD / XRechnung to disk |
+| `easybill_search_documents` | read — full-text search by word, name or number |
+| `easybill_download_document` | read — PDF, image, ZUGFeRD 1.0–2.5, XRechnung (to disk locally, inline when hosted) |
 | `easybill_list_document_versions` | read — audit trail |
 | `easybill_create_document` | write |
 | `easybill_update_document` | write |
@@ -428,9 +430,24 @@ punctuation (`M.B. MUSTERMANN` vs `MB Mustermann`), umlauts and word order.
 `easybill_delete_attachment`, `easybill_list_text_templates`, `easybill_get_text_template`,
 `easybill_list_pdf_templates`
 
+### Incoming documents (Eingangsbelege)
+
+`easybill_list_incoming_documents`, `easybill_search_incoming_documents`,
+`easybill_get_incoming_document`, `easybill_list_incoming_document_files`,
+`easybill_download_incoming_document_file` (read);
+`easybill_upload_incoming_document`, `easybill_update_incoming_document`,
+`easybill_complete_incoming_document`, `easybill_delete_incoming_document` (write).
+
+Uploads are extracted by easybill in the background; the tools guide the agent through
+review → correction → completion.
+
 ### Server
 
 `easybill_get_server_info` — reports mode, limits and whether the credentials work.
+In hosted mode also `easybill_list_accounts` — connected accounts and the link to connect more.
+
+Files in hosted mode: downloads come back inside the tool result and uploads take base64 —
+the server never reads or writes caller-chosen paths on its own disk.
 
 ---
 
@@ -498,11 +515,11 @@ field set**, and single-record lookups return everything. Both accept `fields`:
 Responses over `EASYBILL_CHARACTER_LIMIT` are truncated, halving the item count until they
 fit, and say so in `truncation_message`.
 
-### No fuzzy customer search
+### Full-text search vs. filters
 
-The easybill API has no full-text search. Customer filters match **exact** values (each
-accepts several comma-separated). To find a customer by partial name, either use the exact
-spelling or page through and match locally.
+List filters match **exact** values (each accepts several comma-separated). For a partial name,
+a word or a topic use the full-text tools (API 1.102+): `easybill_find_customer`,
+`easybill_search_documents`, `easybill_search_incoming_documents`. Each costs one request.
 
 ### Useful filter recipes
 

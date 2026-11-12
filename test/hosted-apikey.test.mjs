@@ -39,8 +39,11 @@ function freePort() {
 
 function startFakeEasybill(port) {
   const state = { keys: { ...KEYS }, calls: [] };
-  const server = http.createServer((req, res) => {
+  const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://127.0.0.1:${port}`);
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const rawBody = Buffer.concat(chunks);
     const key = (req.headers.authorization ?? "").replace(/^Bearer /, "");
     const company = state.keys[key];
     const json = (status, body) => {
@@ -49,10 +52,31 @@ function startFakeEasybill(port) {
     };
     if (!company) return json(401, { message: "Unauthorized" });
     const p = url.pathname.replace(/^\/rest\/v1/, "");
-    state.calls.push({ path: p, key });
+    state.calls.push({ path: p, key, method: req.method, query: Object.fromEntries(url.searchParams) });
     if (p === "/logins") return json(200, { page: 1, pages: 1, limit: 1000, total: COMPANIES[company].length, items: COMPANIES[company] });
     if (p === "/customers") {
       return json(200, { page: 1, pages: 1, limit: 100, total: 1, items: [{ id: 1, display_name: `Customer of company ${company}` }] });
+    }
+    if (p === "/customers/search") {
+      return json(200, {
+        page: 1,
+        pages: 1,
+        limit: 100,
+        total: 2,
+        // Sorted by customer number, not relevance — the server must re-rank.
+        items: [
+          { id: 10, number: "1", company_name: "Muster Logistik AG" },
+          { id: 11, number: "2", company_name: "Mustermann Handels GmbH & Co. KG" },
+        ],
+      });
+    }
+    if (p === "/documents/7/pdf") {
+      res.writeHead(200, { "Content-Type": "application/pdf", "Content-Disposition": 'attachment; filename="RE-4711.pdf"' });
+      return res.end(Buffer.from("%PDF-1.4 fake invoice"));
+    }
+    if (p === "/incoming-documents" && req.method === "POST") {
+      state.upload = { contentType: req.headers["content-type"], body: rawBody.toString("latin1") };
+      return json(201, { id: "0f8fad5b-d9cb-469f-a165-70867728950e", status: "PREPARING", interface: "UPLOAD" });
     }
     json(404, { message: "not found" });
   });
@@ -240,6 +264,55 @@ describe("hosted mode with personal API keys", () => {
     assert.match(b.content[0].text, /company B/);
     const keys = fake.state.calls.filter((c) => c.path === "/customers").map((c) => c.key);
     assert.deepEqual(keys.slice(-2), ["key-a2", "key-b"]);
+  });
+
+  it("finds a customer with one full-text search request and ranks by match", async () => {
+    const before = fake.state.calls.length;
+    const result = await callTool("easybill_find_customer", { account: "alpha", query: "Mustermann Handels" });
+    const calls = fake.state.calls.slice(before);
+    assert.deepEqual(calls.map((c) => c.path), ["/customers/search"], "exactly one request");
+    assert.equal(calls[0].query.query, "Mustermann Handels");
+    const [best] = result.structuredContent.candidates;
+    assert.equal(best.id, 11, "the better match comes first despite the API's number order");
+    assert.equal(best.matched_by, "full-text search");
+  });
+
+  it("returns downloads inline instead of writing to the server's disk", async () => {
+    const { tools } = await (async () => {
+      const res = await fetch(`${base}/mcp`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 999, method: "tools/list" }),
+      });
+      return (await res.json()).result;
+    })();
+    for (const name of ["easybill_download_document", "easybill_download_attachment", "easybill_download_incoming_document_file"]) {
+      const tool = tools.find((t) => t.name === name);
+      assert.ok(!("output_path" in tool.inputSchema.properties), `${name} must not take a server path`);
+    }
+    const upload = tools.find((t) => t.name === "easybill_upload_incoming_document");
+    assert.ok(!("file_path" in upload.inputSchema.properties), "uploads must not read server files");
+
+    const result = await callTool("easybill_download_document", { account: "alpha", id: 7 });
+    assert.ok(!result.isError, JSON.stringify(result));
+    const resource = result.content.find((c) => c.type === "resource").resource;
+    assert.equal(resource.mimeType, "application/pdf");
+    assert.equal(Buffer.from(resource.blob, "base64").toString(), "%PDF-1.4 fake invoice");
+    assert.equal(result.structuredContent.file_name, "RE-4711.pdf");
+  });
+
+  it("uploads an incoming document from base64 as multipart form data", async () => {
+    const result = await callTool("easybill_upload_incoming_document", {
+      account: "alpha",
+      file_name: 'lieferant "4711".pdf',
+      content_base64: Buffer.from("%PDF-1.4 supplier invoice").toString("base64"),
+    });
+    assert.ok(!result.isError, JSON.stringify(result));
+    const { contentType, body } = fake.state.upload;
+    assert.match(contentType, /^multipart\/form-data; boundary=/);
+    assert.match(body, /name="file"; filename="lieferant _4711_.pdf"/, "quotes in the name are neutralised");
+    assert.match(body, /Content-Type: application\/pdf/);
+    assert.match(body, /%PDF-1\.4 supplier invoice/);
   });
 
   it("marks a revoked key and asks for a new one", async () => {
