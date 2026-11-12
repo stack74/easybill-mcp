@@ -2,7 +2,8 @@
  * HTTP client for the easybill REST API.
  *
  * Responsibilities:
- *  - Bearer authentication from EASYBILL_API_KEY
+ *  - Bearer authentication — a static API key (stdio mode) or an OAuth access
+ *    token supplied per call by a token source (hosted mode)
  *  - Proactive client-side throttling (easybill allows only 10-60 req/min)
  *  - Retry with backoff on 429 / 5xx / network blips, honouring Retry-After
  *  - Mapping HTTP failures onto actionable error messages
@@ -67,7 +68,7 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
  * timestamps and waits for the oldest to age out before issuing the next call.
  * Serialised through a promise chain so concurrent tool calls queue in order.
  */
-class RateLimiter {
+export class RateLimiter {
   private readonly timestamps: number[] = [];
   private queue: Promise<void> = Promise.resolve();
 
@@ -151,10 +152,45 @@ function fileNameFromDisposition(header: string | null): string | undefined {
   return plain?.[1]?.trim();
 }
 
-export class EasybillClient {
-  private readonly limiter = new RateLimiter(RATE_LIMIT_PER_MINUTE);
+/**
+ * What the tool modules need from a client. Lets hosted mode hand the tools a
+ * router that picks the per-account client at call time.
+ */
+export interface ApiClient {
+  request<T>(path: string, options?: RequestOptions): Promise<T>;
+  requestBinary(path: string, options?: RequestOptions): Promise<BinaryResponse>;
+}
 
-  constructor(private readonly apiKey: string) {}
+/**
+ * Supplies the bearer credential for each request. `forceRefresh` is set after
+ * easybill answered 401, so an OAuth source can refresh an access token that
+ * expired or was revoked early.
+ */
+export type TokenSource = (options: { forceRefresh: boolean }) => Promise<string>;
+
+export interface ClientOptions {
+  /**
+   * Throttle to use. Pass a shared instance when several clients talk to the
+   * same easybill account — the plan limit is per account, not per client.
+   */
+  limiter?: RateLimiter;
+}
+
+export class EasybillClient implements ApiClient {
+  private readonly limiter: RateLimiter;
+  private readonly tokenSource: TokenSource;
+  private readonly canRefresh: boolean;
+
+  constructor(auth: string | TokenSource, options: ClientOptions = {}) {
+    this.limiter = options.limiter ?? new RateLimiter(RATE_LIMIT_PER_MINUTE);
+    if (typeof auth === "string") {
+      this.tokenSource = async () => auth;
+      this.canRefresh = false;
+    } else {
+      this.tokenSource = auth;
+      this.canRefresh = true;
+    }
+  }
 
   /** Performs a JSON request and returns the decoded body (undefined for 204). */
   async request<T>(path: string, options: RequestOptions = {}): Promise<T> {
@@ -188,11 +224,13 @@ export class EasybillClient {
     const url = `${API_BASE_URL}${path}${buildQuery(query)}`;
 
     let lastError: unknown;
+    let refreshed = false;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      const token = await this.tokenSource({ forceRefresh: refreshed });
       await this.limiter.acquire();
 
       const requestHeaders: Record<string, string> = {
-        Authorization: `Bearer ${this.apiKey}`,
+        Authorization: `Bearer ${token}`,
         Accept: accept,
         "User-Agent": `${SERVER_NAME}/${SERVER_VERSION}`,
         ...headers,
@@ -215,6 +253,15 @@ export class EasybillClient {
         });
 
         if (response.ok) return response;
+
+        // An OAuth access token can be revoked or expire between our expiry check
+        // and the request. One forced refresh, then give up.
+        if (response.status === 401 && this.canRefresh && !refreshed) {
+          refreshed = true;
+          await response.body?.cancel();
+          attempt--; // the refresh retry does not count against MAX_RETRIES
+          continue;
+        }
 
         const retryAfter = parseRetryAfter(response.headers.get("retry-after"));
         const retriable = response.status === 429 || response.status >= 500;
@@ -267,7 +314,11 @@ export function formatApiError(error: unknown): string {
       case 400:
         return `Error: easybill rejected the request as invalid (400) on ${path}.${suffix} Check required fields and that dates use YYYY-MM-DD.`;
       case 401:
-        return `Error: authentication failed (401). Verify EASYBILL_API_KEY is a valid easybill API key (easybill: Einstellungen -> App-Center -> API).${suffix}`;
+        return (
+          `Error: authentication failed (401).${suffix} ` +
+          `With a local install, verify EASYBILL_API_KEY is a valid easybill API key (easybill: Einstellungen -> App-Center -> API). ` +
+          `With the hosted server, reconnect the easybill account — easybill_list_accounts returns the link.`
+        );
       case 403:
         return `Error: access denied (403) on ${path}. Your easybill plan or API key may not include this resource.${suffix}`;
       case 404:
@@ -284,7 +335,7 @@ export function formatApiError(error: unknown): string {
           : " Wait about a minute before retrying.";
         return (
           `Error: easybill rate limit exceeded (429).${wait} ` +
-          `The plan limit is 10 req/min (PLUS) or 60 req/min (BUSINESS). ` +
+          `The plan limit is 10 req/min (Professional) or 60 req/min (Premium). ` +
           `Set EASYBILL_RATE_LIMIT_PER_MINUTE to match your plan so the server throttles itself.`
         );
       }

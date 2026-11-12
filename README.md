@@ -37,7 +37,7 @@ Configuration is entirely through environment variables (full list under
 [Configuration](#configuration)). Two matter now:
 
 - Leave `EASYBILL_ENABLE_WRITES` unset to start **read-only**.
-- Set `EASYBILL_RATE_LIMIT_PER_MINUTE` to **10** on easybill's PLUS plan or **60** on BUSINESS.
+- Set `EASYBILL_RATE_LIMIT_PER_MINUTE` to **10** on easybill's Professional plan or **60** on Premium (Free and Starter have no API access).
 
 Most clients use the same JSON shape under an `mcpServers` key:
 
@@ -143,8 +143,11 @@ env = { EASYBILL_API_KEY = "your_api_key_here", EASYBILL_RATE_LIMIT_PER_MINUTE =
 
 #### Hosted clients that only speak remote MCP
 
-Some clients (ChatGPT connectors, hosted agent platforms) accept only HTTP/SSE endpoints, not
-stdio. Bridge it locally:
+For claude.ai and other remote-only clients, run the server in **hosted mode** (see
+"Hosted mode" below): one connector for the whole company, each person connects the easybill
+accounts they use with their personal API key.
+
+For a quick single-user experiment you can instead bridge the stdio server locally:
 
 ```bash
 npx -y supergateway --stdio "npx -y easybill-mcp"
@@ -264,13 +267,100 @@ creates a git tag. npm does not allow republishing an existing version.
 
 ---
 
+## Hosted mode (claude.ai connector, several easybill accounts)
+
+`easybill-mcp --http` runs the server as a remote MCP endpoint (Streamable HTTP) for a whole
+company:
+
+1. Someone adds the connector in claude.ai (or any OAuth-capable MCP client).
+2. The client opens this server's **connect page**. It lists the easybill accounts from your
+   tenant configuration; the person clicks *Verbinden* on each account they have access to and
+   pastes **their personal easybill API key** (easybill: user icon → *Profil und Einstellungen*
+   → *API Key*). The server checks it against easybill before storing it.
+3. *Fertig – zurück zu Claude* completes the client's OAuth flow.
+
+Every tool then takes an `account` argument (`easybill_list_accounts` shows the status and
+hands out a link to connect more accounts or replace a key). Keys are stored AES-GCM encrypted
+in SQLite. A key easybill rejects later (regenerated, login removed) is marked and the model
+hands out the link to replace it.
+
+This server is the OAuth authorization server for the MCP client (claude.ai); easybill itself
+only sees API-key requests. An API key does not say which easybill account it belongs to, so on
+the first connection of a tenant the server remembers the account's login IDs (from `/logins`)
+and refuses later keys from a different account, including a key that already belongs to another
+configured tenant.
+
+**easybill OAuth instead of API keys** (`EASYBILL_CONNECT_MODE=oauth`): people log in at easybill
+instead of pasting a key. easybill only allows dynamic client registration for an allowlist of
+redirect URIs (claude.ai and similar), so this mode needs an OAuth client issued by easybill for
+`<EASYBILL_PUBLIC_URL>/connect/callback` (`EASYBILL_OAUTH_CLIENT_ID` / `_SECRET`).
+
+### Tenant configuration
+
+```json
+{
+  "tenants": [
+    { "id": "firma-a", "name": "Firma A GmbH", "plan": "PREMIUM", "writes": true },
+    { "id": "firma-b", "name": "Firma B GmbH", "plan": "PROFESSIONAL", "writes": false }
+  ]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | Slug the model passes as `account`. |
+| `name` | Shown on the connect page and to the model. |
+| `plan` | `PROFESSIONAL` (10 req/min) or `PREMIUM` (60 req/min); the former names `PLUS` / `BUSINESS` work too. Free and Starter have no API access. Throttle shared by everyone on the account. Or set `rate_limit_per_minute`. |
+| `writes` | `true` registers create/update/delete for this account and requests write scopes from easybill. Default read-only scopes. |
+| `scopes` | Optional override of the easybill OAuth scopes. |
+| `match` | OAuth mode only: `{ "<claim>": "<value>" }` checked against easybill's access-token claims, so a login of the wrong company is refused. The server logs the claims of every new connection. |
+
+### Environment
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `EASYBILL_PUBLIC_URL` | — | **Required.** Public https base URL. The connector URL is `<this>/mcp`. |
+| `EASYBILL_MCP_SECRET` | — | **Required.** ≥ 32 characters; encrypts stored tokens and signs the browser cookie. Changing it invalidates all connections. |
+| `EASYBILL_TENANTS_FILE` / `EASYBILL_TENANTS` | — | **Required.** Path to the tenant JSON, or the JSON inline. |
+| `EASYBILL_DB_PATH` | `./data/easybill-mcp.sqlite` | SQLite file. Put it on a persistent volume. |
+| `PORT` / `HOST` | `3000` / `0.0.0.0` | Listen address. |
+| `EASYBILL_CF_ACCESS_TEAM_DOMAIN` / `EASYBILL_CF_ACCESS_AUD` | — | Put the connect pages behind Cloudflare Access: team domain (e.g. `acme` or `acme.cloudflareaccess.com`) and the Access application's AUD tag. `/connect/*` then requires a valid Access token, checked by the server itself. |
+| `EASYBILL_CONNECT_MODE` | `apikey` (`oauth` if a client ID is set) | How people connect easybill accounts. |
+| `EASYBILL_OAUTH_CLIENT_ID` / `_SECRET` | — | OAuth mode: the client easybill issued for this server. |
+| `EASYBILL_OAUTH_ISSUER` | `https://api.easybill.de` | OAuth mode: easybill's OAuth issuer. |
+| `EASYBILL_MCP_ACCESS_TOKEN_TTL` | `3600` | Lifetime (s) of access tokens issued to MCP clients. |
+| `EASYBILL_MCP_REFRESH_TOKEN_TTL` | `7776000` | Lifetime (s) of refresh tokens issued to MCP clients (90 days). |
+
+Needs Node.js ≥ 22.13 (built-in `node:sqlite`). The `Dockerfile` builds a ready image:
+
+```bash
+docker build -t easybill-mcp .
+docker run -p 3000:3000 -v easybill-mcp-data:/data \
+  -v $PWD/tenants.json:/config/tenants.json:ro \
+  -e EASYBILL_TENANTS_FILE=/config/tenants.json \
+  -e EASYBILL_PUBLIC_URL=https://easybill-mcp.example.com \
+  -e EASYBILL_MCP_SECRET="$(openssl rand -base64 48)" \
+  easybill-mcp
+```
+
+**Cloudflare Zero Trust:** protect only the path `/connect` with an Access application (the
+connect pages are opened in a browser). Leave `/mcp`, `/token`, `/register`, `/authorize` and
+`/.well-known/*` outside Access — claude.ai calls them from its servers and cannot pass an Access
+login. Without the connect pages nobody can complete the authorization, so tokens stay out of
+reach. Set the two `EASYBILL_CF_ACCESS_*` variables so the server rejects requests that bypass
+Cloudflare (e.g. via the origin IP).
+
+Run it behind TLS (reverse proxy). Then in claude.ai: *Settings → Connectors → Add custom
+connector* with `https://easybill-mcp.example.com/mcp` (organization admins can add it once for
+everyone; each person still connects their own easybill logins).
+
 ## Configuration
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `EASYBILL_API_KEY` | — | **Required.** Your easybill API key. |
 | `EASYBILL_ENABLE_WRITES` | *unset* | Set to `true` to register create/update/delete tools. Otherwise read-only. |
-| `EASYBILL_RATE_LIMIT_PER_MINUTE` | `60` | Client-side throttle. Use `10` for PLUS, `60` for BUSINESS. |
+| `EASYBILL_RATE_LIMIT_PER_MINUTE` | `60` | Client-side throttle. Use `10` for Professional, `60` for Premium. |
 | `EASYBILL_CHARACTER_LIMIT` | `25000` | Max characters per response before truncation. |
 | `EASYBILL_TIMEOUT_MS` | `30000` | HTTP request timeout. |
 | `EASYBILL_MAX_RETRIES` | `3` | Retries on HTTP 429 / 5xx. |
@@ -388,7 +478,7 @@ legal reasons.
 
 ### Rate limits are low
 
-easybill allows **10 requests/minute on PLUS** and **60 on BUSINESS**. The server throttles
+easybill allows **10 requests/minute on Professional** and **60 on Premium** (formerly PLUS and BUSINESS). The server throttles
 itself to `EASYBILL_RATE_LIMIT_PER_MINUTE` and, if a 429 slips through, retries while honouring
 `Retry-After`. Set the variable to match your plan — otherwise a broad question that pages
 through many documents will stall.

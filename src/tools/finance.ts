@@ -3,10 +3,10 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SUMMARY_FIELDS } from "../constants.js";
 import { dateFilter, multiFilter } from "../schemas/common.js";
-import type { EasybillClient } from "../services/client.js";
+import type { ApiClient } from "../services/client.js";
 import { registerCrudTools } from "./crud.js";
 
-export function registerFinanceTools(server: McpServer, client: EasybillClient): void {
+export function registerFinanceTools(server: McpServer, client: ApiClient): void {
   registerCrudTools(server, client, {
     singular: "document payment",
     plural: "document payments",

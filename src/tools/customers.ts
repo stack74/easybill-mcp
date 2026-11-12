@@ -3,7 +3,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SUMMARY_FIELDS } from "../constants.js";
 import { dateFilter, multiFilter } from "../schemas/common.js";
-import type { EasybillClient } from "../services/client.js";
+import type { ApiClient } from "../services/client.js";
 import { registerCrudTools } from "./crud.js";
 
 const CUSTOMER_BODY_HINT = `Required: last_name AND company_name (send an empty string for whichever does not apply —
@@ -36,7 +36,7 @@ emails (array of strings), phone_1, phone_2, mobile, fax, note, personal (boolea
 Contacts are the individual people at a customer. A document can reference one
 via its 'contact_id' field.`;
 
-export function registerCustomerTools(server: McpServer, client: EasybillClient): void {
+export function registerCustomerTools(server: McpServer, client: ApiClient): void {
   registerCrudTools(server, client, {
     singular: "customer",
     plural: "customers",

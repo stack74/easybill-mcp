@@ -1,0 +1,16 @@
+{
+  "tenants": [
+    {
+      "id": "firma-a",
+      "name": "Firma A GmbH",
+      "plan": "PREMIUM",
+      "writes": true
+    },
+    {
+      "id": "firma-b",
+      "name": "Firma B GmbH",
+      "plan": "PROFESSIONAL",
+      "writes": false
+    }
+  ]
+}

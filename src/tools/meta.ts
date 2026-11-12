@@ -13,13 +13,12 @@ import {
   CHARACTER_LIMIT,
   RATE_LIMIT_PER_MINUTE,
   SERVER_VERSION,
-  WRITES_ENABLED,
 } from "../constants.js";
-import type { EasybillClient } from "../services/client.js";
+import type { ApiClient } from "../services/client.js";
 import type { Record_, ToolResult } from "../services/format.js";
-import { registerRead, registrationStats } from "./registry.js";
+import { registerRead, serverContext } from "./registry.js";
 
-export function registerMetaTools(server: McpServer, client: EasybillClient): void {
+export function registerMetaTools(server: McpServer, client: ApiClient): void {
   registerRead(
     server,
     {
@@ -42,6 +41,10 @@ export function registerMetaTools(server: McpServer, client: EasybillClient): vo
       },
     },
     async (args): Promise<ToolResult> => {
+      const context = serverContext(server);
+      const registrationStats = context.stats;
+      const WRITES_ENABLED = context.writesEnabled;
+      const hosted = context.accounts !== undefined;
 
       let connection = "not tested";
       if (args.test_connection !== false) {
@@ -71,9 +74,13 @@ export function registerMetaTools(server: McpServer, client: EasybillClient): vo
 
       const modeLine = WRITES_ENABLED
         ? `Write mode is ENABLED — ${registrationStats.write} create/update/delete tools are available.`
-        : `Write mode is DISABLED (read-only). ${registrationStats.skipped} create/update/delete tools ` +
-          `are withheld. To enable them, set EASYBILL_ENABLE_WRITES=true in the server's environment ` +
-          `and restart the MCP server.`;
+        : hosted
+          ? `Write mode is DISABLED (read-only). ${registrationStats.skipped} create/update/delete tools ` +
+            `are withheld because none of the connected accounts allows writes. Which accounts allow ` +
+            `writes is set by the server administrator in the tenant configuration.`
+          : `Write mode is DISABLED (read-only). ${registrationStats.skipped} create/update/delete tools ` +
+            `are withheld. To enable them, set EASYBILL_ENABLE_WRITES=true in the server's environment ` +
+            `and restart the MCP server.`;
 
       const text = [
         `# easybill MCP server v${SERVER_VERSION}`,
@@ -84,7 +91,7 @@ export function registerMetaTools(server: McpServer, client: EasybillClient): vo
         `- **Read-only tools**: ${registrationStats.read}`,
         `- **Write tools**: ${registrationStats.write}`,
         `- **Rate limit (client-side throttle)**: ${RATE_LIMIT_PER_MINUTE} requests/minute`,
-        `  easybill allows 10/min on PLUS and 60/min on BUSINESS — set EASYBILL_RATE_LIMIT_PER_MINUTE to match your plan.`,
+        `  easybill allows 10/min on Professional and 60/min on Premium — set EASYBILL_RATE_LIMIT_PER_MINUTE to match your plan.`,
         `- **Response character limit**: ${CHARACTER_LIMIT.toLocaleString("en-US")}`,
         `- **Connection**: ${connection}`,
       ].join("\n");

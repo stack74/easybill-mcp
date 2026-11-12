@@ -4,7 +4,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { SUMMARY_FIELDS } from "../constants.js";
 import { multiFilter } from "../schemas/common.js";
-import type { EasybillClient } from "../services/client.js";
+import type { ApiClient } from "../services/client.js";
 import { registerCrudTools } from "./crud.js";
 
 const POSITION_BODY_HINT = `Required: number, description, sale_price.
@@ -28,7 +28,7 @@ Key fields:
 - note, document_note (string): internal note vs. text printed on documents.
 - archived (boolean).`;
 
-export function registerCatalogTools(server: McpServer, client: EasybillClient): void {
+export function registerCatalogTools(server: McpServer, client: ApiClient): void {
   registerCrudTools(server, client, {
     singular: "position",
     plural: "positions",

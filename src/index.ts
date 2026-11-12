@@ -5,7 +5,11 @@
  * Exposes invoices and other documents, customers, contacts, the article
  * catalogue, payments, projects, time tracking, attachments and templates.
  *
- * Transport: stdio (local). Never log to stdout — it carries the MCP protocol.
+ * Transports:
+ *   stdio (default, local) — one easybill account via EASYBILL_API_KEY.
+ *     Never log to stdout — it carries the MCP protocol.
+ *   --http (hosted)        — Streamable HTTP + OAuth for remote connectors such as
+ *     claude.ai; people connect their own easybill accounts. See src/hosted/.
  *
  * Environment:
  *   EASYBILL_API_KEY                (required)
@@ -15,7 +19,6 @@
  *   EASYBILL_TIMEOUT_MS             (optional, default 30000)
  */
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   API_BASE_URL,
@@ -24,18 +27,9 @@ import {
   SERVER_VERSION,
   WRITES_ENABLED,
 } from "./constants.js";
-import { SERVER_INSTRUCTIONS } from "./instructions.js";
 import { EasybillClient, formatApiError } from "./services/client.js";
 import type { EasybillList, Record_ } from "./services/format.js";
-import { registerCatalogTools } from "./tools/catalog.js";
-import { registerCustomerTools } from "./tools/customers.js";
-import { registerDocumentTools } from "./tools/documents.js";
-import { registerFileTools } from "./tools/files.js";
-import { registerFinanceTools } from "./tools/finance.js";
-import { registerMetaTools } from "./tools/meta.js";
-import { registrationStats } from "./tools/registry.js";
-import { registerSearchTools } from "./tools/search.js";
-import { registerWorkTools } from "./tools/work.js";
+import { createEasybillServer } from "./server.js";
 
 const USAGE = `${SERVER_NAME} v${SERVER_VERSION}
 
@@ -48,12 +42,16 @@ Required environment:
 
 Optional environment:
   EASYBILL_ENABLE_WRITES=true     Enable create/update/delete tools. Default: read-only.
-  EASYBILL_RATE_LIMIT_PER_MINUTE  Client-side throttle. Use 10 for PLUS, 60 for BUSINESS.
+  EASYBILL_RATE_LIMIT_PER_MINUTE  Client-side throttle. Use 10 for Professional, 60 for Premium.
   EASYBILL_CHARACTER_LIMIT        Max characters per response before truncation (default 25000).
   EASYBILL_TIMEOUT_MS             HTTP timeout in milliseconds (default 30000).
   EASYBILL_MAX_RETRIES            Retries on 429/5xx (default 3).
 
 Flags:
+  --http            Run as a hosted remote server (Streamable HTTP + OAuth) instead of stdio.
+                    Each person connects their easybill accounts with their own easybill login;
+                    no API key is used. Requires EASYBILL_PUBLIC_URL, EASYBILL_MCP_SECRET and
+                    EASYBILL_TENANTS_FILE — see the README section "Hosted mode".
   --help, -h        Show this help.
   --version, -v     Print the version.
   --selftest        Make a few READ-ONLY calls against easybill and report what came back.
@@ -131,6 +129,13 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (process.argv.includes("--http") || process.env.EASYBILL_TRANSPORT === "http") {
+    // Loaded lazily so stdio installs never touch express or node:sqlite.
+    const { startHttpServer } = await import("./hosted/http.js");
+    await startHttpServer();
+    return;
+  }
+
   const apiKey = process.env.EASYBILL_API_KEY?.trim();
   if (!apiKey) {
     console.error(
@@ -150,21 +155,8 @@ async function main(): Promise<void> {
     return;
   }
 
-  const server = new McpServer(
-    { name: SERVER_NAME, version: SERVER_VERSION },
-    { instructions: SERVER_INSTRUCTIONS },
-  );
-
-  // Customer lookup registers first: resolving who the customer is comes before
-  // anything else in almost every real task.
-  registerSearchTools(server, client);
-  registerCustomerTools(server, client);
-  registerDocumentTools(server, client);
-  registerCatalogTools(server, client);
-  registerFinanceTools(server, client);
-  registerWorkTools(server, client);
-  registerFileTools(server, client);
-  registerMetaTools(server, client);
+  const { server, context } = createEasybillServer(client);
+  const registrationStats = context.stats;
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

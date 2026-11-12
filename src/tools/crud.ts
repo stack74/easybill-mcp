@@ -10,7 +10,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ZodRawShape } from "zod";
 import { z } from "zod";
-import type { EasybillClient, QueryParams } from "../services/client.js";
+import type { ApiClient, QueryParams } from "../services/client.js";
 import {
   type EasybillList,
   type Record_,
@@ -97,7 +97,7 @@ const FIELDS_NOTE =
 
 export function registerCrudTools(
   server: McpServer,
-  client: EasybillClient,
+  client: ApiClient,
   config: CrudConfig,
 ): void {
   const {

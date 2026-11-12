@@ -13,7 +13,7 @@ import {
   SUMMARY_FIELDS,
 } from "../constants.js";
 import { dateFilter, idSchema, multiFilter } from "../schemas/common.js";
-import type { EasybillClient } from "../services/client.js";
+import type { ApiClient } from "../services/client.js";
 import {
   type EasybillList,
   type Record_,
@@ -81,7 +81,7 @@ is_draft (use easybill_complete_document), paid_amount, paid_at.
 New documents are created as drafts. Call easybill_complete_document to finalise one
 and have easybill assign its official document number.`;
 
-export function registerDocumentTools(server: McpServer, client: EasybillClient): void {
+export function registerDocumentTools(server: McpServer, client: ApiClient): void {
   registerCrudTools(server, client, {
     singular: "document",
     plural: "documents",

@@ -1,6 +1,6 @@
 {
   "name": "easybill-mcp",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "MCP server for the easybill REST API (invoices, customers, articles, payments, time tracking)",
   "type": "module",
   "main": "dist/index.js",
@@ -18,7 +18,7 @@
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node --test test/format.test.mjs test/client.test.mjs test/rate-limit.test.mjs test/server.test.mjs",
+    "test": "npm run build && node --test test/format.test.mjs test/client.test.mjs test/rate-limit.test.mjs test/server.test.mjs test/hosted.test.mjs test/hosted-apikey.test.mjs test/hosted-access.test.mjs",
     "test:live": "npm run build && node --env-file=.env --test test/live.test.mjs",
     "test:all": "npm run test && npm run test:live",
     "smoke": "node --env-file=.env dist/index.js --selftest",
@@ -62,9 +62,12 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "express": "^5.2.1",
+    "jose": "^6.2.8",
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@types/express": "^5.0.6",
     "@types/node": "^22.10.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"

@@ -17,7 +17,7 @@ Two rules that prevent most mistakes:
 
 1. **All monetary values are integers in CENTS.** 1999 means 19.99 EUR. Never send decimal euros.
    Times in time tracking are in minutes.
-2. **The rate limit is low** — 10 requests/minute on easybill's PLUS plan, 60 on BUSINESS.
+2. **The rate limit is low** — 10 requests/minute on easybill's Professional plan, 60 on Premium.
    Never "browse" or "explore" the data to orient yourself. Go straight to the specific
    filtered call that answers the question. A broad list costs the same as a precise one
    but tells you less.

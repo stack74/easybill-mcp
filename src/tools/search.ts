@@ -13,7 +13,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { SUMMARY_FIELDS } from "../constants.js";
 import { responseFormatSchema } from "../schemas/common.js";
-import type { EasybillClient } from "../services/client.js";
+import type { ApiClient } from "../services/client.js";
 import {
   type EasybillList,
   type Record_,
@@ -89,7 +89,7 @@ function score(customer: Record_, queryTokens: string[], rawQuery: string): numb
   return hits / queryTokens.length;
 }
 
-export function registerSearchTools(server: McpServer, client: EasybillClient): void {
+export function registerSearchTools(server: McpServer, client: ApiClient): void {
   registerRead(
     server,
     {

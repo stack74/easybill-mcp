@@ -4,7 +4,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { SUMMARY_FIELDS } from "../constants.js";
 import { idSchema } from "../schemas/common.js";
-import type { EasybillClient } from "../services/client.js";
+import type { ApiClient } from "../services/client.js";
 import {
   type EasybillList,
   type Record_,
@@ -15,7 +15,7 @@ import {
 import { registerCrudTools } from "./crud.js";
 import { registerRead } from "./registry.js";
 
-export function registerFileTools(server: McpServer, client: EasybillClient): void {
+export function registerFileTools(server: McpServer, client: ApiClient): void {
   registerCrudTools(server, client, {
     singular: "attachment",
     plural: "attachments",

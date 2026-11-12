@@ -39,7 +39,7 @@ export const CHARACTER_LIMIT = intFromEnv("EASYBILL_CHARACTER_LIMIT", 25_000, 1_
 export const TIMEOUT_MS = intFromEnv("EASYBILL_TIMEOUT_MS", 30_000, 1_000);
 
 /**
- * Client-side throttle. easybill allows 10 req/min (PLUS) and 60 req/min (BUSINESS).
+ * Client-side throttle. easybill allows 10 req/min (Professional) and 60 req/min (Premium).
  * Throttling locally is cheaper than burning retries on HTTP 429.
  */
 export const RATE_LIMIT_PER_MINUTE = intFromEnv("EASYBILL_RATE_LIMIT_PER_MINUTE", 60, 1);
