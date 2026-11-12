@@ -5,7 +5,7 @@
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -24,6 +24,8 @@ function freePort() {
     });
   });
 }
+
+const ICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><rect width="1" height="1"/></svg>';
 
 describe("hosted mode behind Cloudflare Access", () => {
   let certs;
@@ -57,6 +59,7 @@ describe("hosted mode behind Cloudflare Access", () => {
     const port = await freePort();
     base = `http://localhost:${port}`;
     dataDir = mkdtempSync(path.join(tmpdir(), "easybill-mcp-access-"));
+    writeFileSync(path.join(dataDir, "icon.svg"), ICON);
     child = spawn("node", [SERVER_ENTRY, "--http"], {
       env: {
         ...process.env,
@@ -71,6 +74,7 @@ describe("hosted mode behind Cloudflare Access", () => {
         EASYBILL_TENANTS: JSON.stringify([{ id: "Alpha", name: "Alpha GmbH", plan: "PREMIUM" }]),
         EASYBILL_CF_ACCESS_TEAM_DOMAIN: issuer,
         EASYBILL_CF_ACCESS_AUD: AUD,
+        EASYBILL_ICON_PATH: path.join(dataDir, "icon.svg"),
       },
       stdio: ["ignore", "ignore", "pipe"],
     });
@@ -152,5 +156,16 @@ describe("hosted mode behind Cloudflare Access", () => {
     assert.equal((await fetch(`${base}/.well-known/oauth-authorization-server`)).status, 200);
     const mcp = await fetch(`${base}/mcp`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
     assert.equal(mcp.status, 401, "/mcp answers with the OAuth challenge, not the Access wall");
+  });
+
+  it("serves the configured icon without Access and links it from the pages", async () => {
+    for (const route of ["/favicon.ico", "/favicon.svg"]) {
+      const res = await fetch(`${base}${route}`);
+      assert.equal(res.status, 200, route);
+      assert.equal(res.headers.get("content-type"), "image/svg+xml", route);
+      assert.equal(await res.text(), ICON, route);
+    }
+    const home = await (await fetch(`${base}/`)).text();
+    assert.match(home, /<link rel="icon" href="\/favicon\.svg" type="image\/svg\+xml">/);
   });
 });

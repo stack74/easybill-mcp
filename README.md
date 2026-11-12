@@ -325,6 +325,7 @@ redirect URIs (claude.ai and similar), so this mode needs an OAuth client issued
 | `EASYBILL_DB_PATH` | `./data/easybill-mcp.sqlite` | SQLite file. Put it on a persistent volume. |
 | `PORT` / `HOST` | `3000` / `0.0.0.0` | Listen address. |
 | `EASYBILL_CF_ACCESS_TEAM_DOMAIN` / `EASYBILL_CF_ACCESS_AUD` | — | Put the connect pages behind Cloudflare Access: team domain (e.g. `acme` or `acme.cloudflareaccess.com`) and the Access application's AUD tag. `/connect/*` then requires a valid Access token, checked by the server itself. |
+| `EASYBILL_ICON_PATH` | — | Path to an `.svg`, `.png` or `.ico` file (e.g. a file mount in your hosting platform). Served as `/favicon.ico` and `/favicon.<ext>`, linked from the pages and announced as the MCP server icon. claude.ai shows the domain's favicon next to a custom connector. |
 | `EASYBILL_CONNECT_MODE` | `apikey` (`oauth` if a client ID is set) | How people connect easybill accounts. |
 | `EASYBILL_OAUTH_CLIENT_ID` / `_SECRET` | — | OAuth mode: the client easybill issued for this server. |
 | `EASYBILL_OAUTH_ISSUER` | `https://api.easybill.de` | OAuth mode: easybill's OAuth issuer. |

@@ -88,6 +88,12 @@ export interface HostedConfig {
    * answers requests carrying a valid Access token for this application.
    */
   cloudflareAccess?: { issuer: string; audience: string };
+  /**
+   * Icon served as favicon and announced in the MCP server info, read from a
+   * file outside the image (e.g. a Coolify file mount). claude.ai shows the
+   * domain's favicon next to a custom connector.
+   */
+  icon?: { path: string; mimeType: string; extension: "svg" | "png" | "ico" };
   /** Lifetime of the access tokens this server issues to MCP clients. */
   accessTokenTtlSeconds: number;
   /** Lifetime of the refresh tokens this server issues to MCP clients. */
@@ -231,6 +237,15 @@ export function loadHostedConfig(env: NodeJS.ProcessEnv = process.env): HostedCo
     cloudflareAccess = { issuer: issuer.replace(/\/+$/, ""), audience: accessAud };
   }
 
+  let icon: HostedConfig["icon"];
+  const iconPath = env.EASYBILL_ICON_PATH?.trim();
+  if (iconPath) {
+    const extension = /\.(svg|png|ico)$/i.exec(iconPath)?.[1]?.toLowerCase() as "svg" | "png" | "ico" | undefined;
+    if (!extension) fail(`EASYBILL_ICON_PATH must end in .svg, .png or .ico, got ${JSON.stringify(iconPath)}`);
+    const mimeType = { svg: "image/svg+xml", png: "image/png", ico: "image/x-icon" }[extension];
+    icon = { path: iconPath, mimeType, extension };
+  }
+
   return {
     publicUrl,
     mcpUrl: new URL(`${publicUrl.href.replace(/\/+$/, "")}/mcp`),
@@ -246,6 +261,7 @@ export function loadHostedConfig(env: NodeJS.ProcessEnv = process.env): HostedCo
       ...(clientSecret ? { clientSecret } : {}),
     },
     ...(cloudflareAccess ? { cloudflareAccess } : {}),
+    ...(icon ? { icon } : {}),
     accessTokenTtlSeconds: intEnv(env, "EASYBILL_MCP_ACCESS_TOKEN_TTL", 3600),
     refreshTokenTtlSeconds: intEnv(env, "EASYBILL_MCP_REFRESH_TOKEN_TTL", 90 * 24 * 3600),
   };

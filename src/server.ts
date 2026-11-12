@@ -6,6 +6,7 @@
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { Icon } from "@modelcontextprotocol/sdk/types.js";
 import { SERVER_NAME, SERVER_VERSION, WRITES_ENABLED } from "./constants.js";
 import { SERVER_INSTRUCTIONS } from "./instructions.js";
 import type { ApiClient } from "./services/client.js";
@@ -29,6 +30,8 @@ export interface CreateServerOptions {
   extraInstructions?: string;
   /** Registers additional tools after the standard set (hosted mode: account tools). */
   extraTools?: (server: McpServer) => void;
+  /** Server icons announced in the MCP initialize response (hosted mode). */
+  icons?: Icon[];
 }
 
 export function createEasybillServer(
@@ -38,7 +41,10 @@ export function createEasybillServer(
   const instructions = options.extraInstructions
     ? `${SERVER_INSTRUCTIONS}\n\n${options.extraInstructions}`
     : SERVER_INSTRUCTIONS;
-  const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION }, { instructions });
+  const server = new McpServer(
+    { name: SERVER_NAME, version: SERVER_VERSION, ...(options.icons?.length ? { icons: options.icons } : {}) },
+    { instructions },
+  );
 
   const context: ServerContext = {
     writesEnabled: options.writesEnabled ?? WRITES_ENABLED,

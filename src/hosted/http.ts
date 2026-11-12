@@ -7,20 +7,23 @@
  *   /connect/...                                            connect page + easybill OAuth callback
  *   POST /mcp                                               MCP endpoint (stateless, bearer auth)
  *   GET  /healthz                                           liveness
+ *   GET  /favicon.ico, /favicon.<ext>                        icon (only with EASYBILL_ICON_PATH)
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import { readFileSync } from "node:fs";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { getOAuthProtectedResourceMetadataUrl, mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import type { Icon } from "@modelcontextprotocol/sdk/types.js";
 import { API_BASE_URL, SERVER_NAME, SERVER_VERSION, TIMEOUT_MS } from "../constants.js";
 import { createEasybillServer } from "../server.js";
 import { type ApiClient, EasybillClient, RateLimiter } from "../services/client.js";
 import { accountInstructions, registerAccountTools } from "./accounts.js";
 import { type HostedConfig, loadHostedConfig, type TenantConfig } from "./config.js";
-import { renderConnectPage, renderKeyForm, renderMessage } from "./pages.js";
+import { renderConnectPage, renderKeyForm, renderMessage, setPageIcon } from "./pages.js";
 import { GrantCookie, HostedOAuthProvider, SESSION_TTL_SECONDS } from "./provider.js";
 import { type SessionRow, Store } from "./store.js";
 import { ConnectionTokens, decodeJwtClaims, EasybillOAuth, pkcePair } from "./upstream.js";
@@ -149,6 +152,27 @@ export async function createHostedApp(config: HostedConfig): Promise<HostedApp> 
   app.get("/healthz", (_req, res) => {
     res.json({ ok: true, version: SERVER_VERSION });
   });
+
+  // Optional icon from outside the image. claude.ai shows the domain's favicon
+  // next to a custom connector; MCP clients read the server info icon.
+  let icons: Icon[] | undefined;
+  if (config.icon) {
+    const { path: iconPath, mimeType, extension } = config.icon;
+    let body: Buffer;
+    try {
+      body = readFileSync(iconPath);
+    } catch (error) {
+      throw new Error(`Hosted mode configuration: cannot read EASYBILL_ICON_PATH ${JSON.stringify(iconPath)}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const iconRoute = `/favicon.${extension}`;
+    const sendIcon = (_req: Request, res: Response): void => {
+      res.set("Cache-Control", "public, max-age=86400").type(mimeType).send(body);
+    };
+    app.get(iconRoute, sendIcon);
+    if (iconRoute !== "/favicon.ico") app.get("/favicon.ico", sendIcon);
+    setPageIcon(iconRoute, mimeType);
+    icons = [{ src: new URL(iconRoute, config.publicUrl).href, mimeType, ...(extension === "svg" ? { sizes: ["any"] } : {}) }];
+  }
 
   app.use(
     mcpAuthRouter({
@@ -457,6 +481,7 @@ export async function createHostedApp(config: HostedConfig): Promise<HostedApp> 
     });
 
     const { server } = createEasybillServer(router, {
+      ...(icons ? { icons } : {}),
       writesEnabled: accountList.some((a) => a.writes),
       accounts: {
         list: accountList,

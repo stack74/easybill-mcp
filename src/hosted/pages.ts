@@ -38,9 +38,16 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 details { margin-top:24px; color:var(--muted); font-size:13px; }
 `;
 
+let iconLink = "";
+
+/** Links the configured icon from every page (set once at startup). */
+export function setPageIcon(href: string, mimeType: string): void {
+  iconLink = `<link rel="icon" href="${escape(href)}" type="${escape(mimeType)}">`;
+}
+
 function layout(title: string, body: string): string {
   return `<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="referrer" content="no-referrer"><title>${escape(title)}</title><style>${STYLE}</style></head>
+<meta name="referrer" content="no-referrer"><title>${escape(title)}</title>${iconLink}<style>${STYLE}</style></head>
 <body><main>${body}</main></body></html>`;
 }
 
