@@ -10,7 +10,9 @@ import http from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
+import { createHash, randomBytes } from "node:crypto";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
+import { Browser } from "./helpers/connect-form.mjs";
 import { SERVER_ENTRY } from "./helpers/mcp-client.mjs";
 
 const AUD = "access-app-aud-123";
@@ -51,6 +53,12 @@ describe("hosted mode behind Cloudflare Access", () => {
     const certsPort = await freePort();
     issuer = `http://127.0.0.1:${certsPort}`;
     certs = http.createServer((req, res) => {
+      // Also plays easybill's REST API for the API-key check of the owner test.
+      if (req.url.startsWith("/rest/v1/logins")) {
+        const ok = req.headers.authorization === "Bearer key-erika";
+        res.writeHead(ok ? 200 : 401, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify(ok ? { items: [{ id: 1, first_name: "Erika", last_name: "Muster" }] } : {}));
+      }
       res.writeHead(req.url === "/cdn-cgi/access/certs" ? 200 : 404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ keys: [jwk] }));
     });
@@ -71,6 +79,8 @@ describe("hosted mode behind Cloudflare Access", () => {
         EASYBILL_PUBLIC_URL: base,
         EASYBILL_MCP_SECRET: "test-secret-test-secret-test-secret-1234",
         EASYBILL_DB_PATH: path.join(dataDir, "db.sqlite"),
+        EASYBILL_BASE_URL: `${issuer}/rest/v1`,
+        EASYBILL_MAX_RETRIES: "0",
         EASYBILL_TENANTS: JSON.stringify([{ id: "Alpha", name: "Alpha GmbH", plan: "PREMIUM" }]),
         EASYBILL_CF_ACCESS_TEAM_DOMAIN: issuer,
         EASYBILL_CF_ACCESS_AUD: AUD,
@@ -167,5 +177,81 @@ describe("hosted mode behind Cloudflare Access", () => {
     }
     const home = await (await fetch(`${base}/`)).text();
     assert.match(home, /<link rel="icon" href="\/favicon\.svg" type="image\/svg\+xml">/);
+  });
+
+  it("binds a grant to the person who finished its first authorization", async () => {
+    const reg = await fetch(`${base}/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        redirect_uris: ["http://localhost:9999/cb"],
+        token_endpoint_auth_method: "none",
+        grant_types: ["authorization_code"],
+        response_types: ["code"],
+      }),
+    });
+    const { client_id } = await reg.json();
+    const verifier = randomBytes(32).toString("base64url");
+    const authorize = async () => {
+      const url = new URL("/authorize", base);
+      for (const [k, v] of Object.entries({
+        response_type: "code",
+        client_id,
+        redirect_uri: "http://localhost:9999/cb",
+        code_challenge: createHash("sha256").update(verifier).digest("base64url"),
+        code_challenge_method: "S256",
+      })) {
+        url.searchParams.set(k, v);
+      }
+      return (await fetch(url, { redirect: "manual" })).headers.get("location");
+    };
+
+    // Erika connects and finishes: the grant is hers from now on.
+    const erika = new Browser(base, { CF_Authorization: await token() });
+    const connect = await authorize();
+    assert.equal((await erika.post(`${connect}/tenants/alpha/key`, { api_key: "key-erika" })).status, 303);
+    const finish = await erika.post(`${connect}/finish`);
+    assert.equal(finish.status, 303);
+    const code = new URL(finish.headers.get("location")).searchParams.get("code");
+    const tokenRes = await fetch(`${base}/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        code,
+        code_verifier: verifier,
+        client_id,
+        redirect_uri: "http://localhost:9999/cb",
+      }),
+    });
+    const { access_token } = await tokenRes.json();
+    const accounts = await fetch(`${base}/mcp`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${access_token}`, "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "easybill_list_accounts", arguments: {} } }),
+    });
+    const manage = new URL((await accounts.json()).result.structuredContent.connect_url).pathname;
+
+    // Max got the manage link forwarded; his browser has no grant cookie, but Access knows him.
+    const max = new Browser(base, { CF_Authorization: await token({ email: "max@example.com" }) });
+    for (const p of [manage, `${manage}/tenants/alpha/key`]) {
+      const res = await max.fetch(p);
+      assert.equal(res.status, 403, p);
+      const html = await res.text();
+      assert.match(html, /Claude-Zugang einer anderen Person/);
+      assert.doesNotMatch(html, /erika/i, "the owner's address is not revealed");
+      assert.doesNotMatch(html, /<form/);
+    }
+    assert.equal((await max.post(`${manage}/finish`, {}, "x")).status, 403);
+
+    // Erika herself, in another browser and with different capitalisation, gets in.
+    const erikaElsewhere = new Browser(base, { CF_Authorization: await token({ email: "ERIKA@Example.com" }) });
+    const page = await erikaElsewhere.fetch(manage);
+    assert.equal(page.status, 200);
+    assert.match(await page.text(), /verwaltet einen bestehenden Claude-Zugang/);
+
+    // A grant nobody finished yet has no owner: Max can start his own connection.
+    const own = await max.fetch(await authorize());
+    assert.equal(own.status, 200);
   });
 });

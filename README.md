@@ -365,7 +365,7 @@ The server hands out access to easybill accounts with the rights of whoever conn
 guards against the "confused deputy" attack from the MCP security best practices: someone registers
 their own client with their own redirect URI, starts the authorization and sends a colleague the
 resulting connect link. The colleague connects their easybill accounts, presses *Fertig* — and the
-authorization code would go to the attacker. Two independent checks prevent that:
+authorization code would go to the attacker. Independent checks prevent that:
 
 - **Redirect allowlist.** Dynamic client registration only accepts known redirect URIs
   (`invalid_redirect_uri` otherwise); `/authorize` checks again and answers with an error page
@@ -374,10 +374,33 @@ authorization code would go to the attacker. Two independent checks prevent that
   own machine.
 - **The connect page is the consent step.** At the top it names the app (its self-declared, unverified
   name) and, more importantly, the address the access goes to, with the advice to cancel if the
-  person did not start the connection in Claude themselves. Every form on the page (connect, API key,
-  disconnect, finish, cancel) carries a CSRF token that must match an `HttpOnly`, `SameSite=Strict`
-  cookie scoped to that connect link, so another site cannot submit the forms in the person's
-  browser even though the link itself may be known.
+  person did not start the connection in Claude themselves.
+- **CSRF bound to the browser.** Each browser gets a random nonce in an `HttpOnly`, `SameSite=Lax`
+  cookie (`__Host-easybill_mcp_browser` when `EASYBILL_PUBLIC_URL` is https: `Secure`, `Path=/`, no
+  `Domain`). Every form on the connect pages (connect, API key, disconnect, finish, cancel) carries
+  `HMAC(secret, session id + nonce)`, and a POST is only accepted when that token matches the
+  nonce cookie it arrives with. Knowing the link is not enough: whoever opens it gets a token for
+  their own browser's nonce, cannot read the victim's nonce or compute the HMAC without the server
+  secret, and — thanks to the `__Host-` prefix — cannot plant a nonce of their choosing from a
+  sibling subdomain (which is same-site, so `SameSite` alone would not stop it).
+
+`easybill_list_accounts` hands out a **manage link** for the caller's own Claude access. Such a link
+can be forwarded, and whatever the recipient connects there would land in the sender's access.
+Three layers guard against that:
+
+- **Warning.** Manage pages (and the API-key form reached from them) say prominently that they
+  manage the Claude access the link came from, to use them only if Claude gave you the link in your
+  own chat, and to close the page if someone sent it to you. The connected accounts stay visible as
+  a hint whose access it is.
+- **Grant cookie.** After *Fertig* the browser remembers its grant (signed cookie). Any
+  `/connect/<sid>` page or form whose session belongs to a different grant than the browser's is
+  refused with 403 and no forms. A browser without that cookie is let through (with the warning).
+  Re-authorizing in the same browser reuses the cookie's grant, so the normal flow is unaffected.
+- **Owner (with Cloudflare Access).** The first *Fertig* of an authorization records the Access
+  e-mail as the grant's owner (never from a manage link). From then on every `/connect/<sid>` page
+  and form of that grant requires the same Access identity (case-insensitive); others get a 403 that
+  does not reveal the owner. Grants from before this check have no owner and rely on the first two
+  layers.
 
 Other measures: easybill tokens and API keys are stored AES-GCM encrypted; the connect pages send a
 strict CSP and cannot be framed; optionally they sit behind Cloudflare Access.

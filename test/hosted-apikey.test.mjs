@@ -14,7 +14,7 @@ import http from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
-import { submitForm } from "./helpers/connect-form.mjs";
+import { Browser, submitForm } from "./helpers/connect-form.mjs";
 import { SERVER_ENTRY } from "./helpers/mcp-client.mjs";
 
 /** Companies and their logins. Login IDs are unique across easybill. */
@@ -93,6 +93,8 @@ describe("hosted mode with personal API keys", () => {
   let clientId;
   let sessionPath;
   let accessToken;
+  /** The grant cookie the browser got with "Fertig" ("name=value"). */
+  let grantCookie;
   const redirectUri = "http://localhost:9999/callback";
   const verifier = randomBytes(32).toString("base64url");
   const challenge = createHash("sha256").update(verifier).digest("base64url");
@@ -236,6 +238,8 @@ describe("hosted mode with personal API keys", () => {
   it("connects the second account and completes the MCP client's authorization", async () => {
     assert.equal((await submitKey("beta", "key-b")).status, 303);
     const finish = await postForm(`${sessionPath}/finish`);
+    grantCookie = finish.headers.getSetCookie().find((c) => c.startsWith("easybill_mcp_grant="))?.split(";")[0];
+    assert.ok(grantCookie, "Fertig remembers the grant in the browser");
     const target = new URL(finish.headers.get("location"));
     assert.equal(target.searchParams.get("state"), "s1");
     const token = await fetch(`${base}/token`, {
@@ -320,5 +324,98 @@ describe("hosted mode with personal API keys", () => {
     assert.equal(accounts.structuredContent.accounts.find((x) => x.account === "beta").status, "expired");
     const page = await (await get(new URL(accounts.structuredContent.connect_url).pathname)).text();
     assert.match(page, /API-Key ungültig/);
+  });
+
+  /** Starts another authorization (as from another person's Claude) and returns its connect path. */
+  async function authorizeAgain(browser) {
+    const authorize = new URL("/authorize", base);
+    for (const [k, v] of Object.entries({
+      response_type: "code",
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+    })) {
+      authorize.searchParams.set(k, v);
+    }
+    const res = await browser.fetch(authorize);
+    assert.equal(res.status, 302);
+    return res.headers.get("location");
+  }
+
+  const statusOf = async (account) =>
+    (await callTool("easybill_list_accounts", {})).structuredContent.accounts.find((x) => x.account === account).status;
+
+  describe("manage links handed to someone else", () => {
+    let manage;
+
+    before(async () => {
+      fake.state.keys["key-b"] = "B"; // valid again, so a stored key would show
+      manage = new URL((await callTool("easybill_list_accounts", {})).structuredContent.connect_url).pathname;
+    });
+
+    it("warns on the manage page and its key form, and still lists the connected accounts", async () => {
+      const page = await (await get(manage)).text();
+      assert.match(page, /verwaltet einen bestehenden Claude-Zugang/);
+      assert.match(page, /deinem eigenen Chat/);
+      assert.match(page, /Hat dir jemand diesen Link geschickt, schließe die Seite/);
+      assert.match(page, /Verbunden \(Key …y-a2\)/, "the connected accounts hint whose access it is");
+      const form = await (await get(`${manage}/tenants/beta/key`)).text();
+      assert.match(form, /verwaltet einen bestehenden Claude-Zugang/);
+      assert.match(form, /name="api_key"/);
+    });
+
+    it("refuses it in a browser connected to another Claude access, and stores nothing", async () => {
+      // A colleague who set up their own Claude access in this browser.
+      const colleague = new Browser(base);
+      const own = await authorizeAgain(colleague);
+      assert.equal((await colleague.post(`${own}/tenants/alpha/key`, { api_key: "key-a1" })).status, 303);
+      assert.equal((await colleague.post(`${own}/finish`)).status, 303);
+      assert.ok(colleague.jar.has("easybill_mcp_grant"));
+
+      const page = await colleague.fetch(manage);
+      assert.equal(page.status, 403);
+      const html = await page.text();
+      assert.match(html, /anderen Claude-Zugang als dem, der in diesem Browser verbunden ist/);
+      assert.doesNotMatch(html, /<form/, "no forms at all");
+      assert.equal((await colleague.fetch(`${manage}/tenants/beta/key`)).status, 403);
+
+      // Even with a valid CSRF token for this browser (rendered while the grant cookie was absent):
+      const nonce = colleague.browserCookie;
+      const withoutGrant = new Browser(base);
+      withoutGrant.set(nonce);
+      const token = await withoutGrant.csrf(manage);
+      const callsBefore = fake.state.calls.length;
+      const key = await colleague.post(`${manage}/tenants/beta/key`, { api_key: "key-b" }, token);
+      assert.equal(key.status, 403);
+      assert.equal(key.headers.get("location"), null);
+      assert.equal(fake.state.calls.length, callsBefore, "the key was not even checked");
+      assert.equal((await colleague.post(`${manage}/tenants/alpha/disconnect`, {}, token)).status, 403);
+      assert.equal((await colleague.post(`${manage}/finish`, {}, token)).status, 403);
+      assert.equal(await statusOf("beta"), "expired", "nothing stored");
+      assert.equal(await statusOf("alpha"), "connected", "nothing removed");
+    });
+
+    it("works in the browser of the same Claude access", async () => {
+      const owner = new Browser(base);
+      owner.set(grantCookie);
+      const page = await owner.fetch(manage);
+      assert.equal(page.status, 200);
+      assert.match(await page.text(), /verwaltet einen bestehenden Claude-Zugang/, "the warning is shown regardless");
+      const res = await owner.post(`${manage}/tenants/beta/key`, { api_key: "key-b" });
+      assert.equal(res.status, 303);
+      assert.match(res.headers.get("location"), /n=connected/);
+      assert.equal(await statusOf("beta"), "connected");
+    });
+
+    it("lets a connection started in the same browser through (authorize reuses the cookie's grant)", async () => {
+      const owner = new Browser(base);
+      owner.set(grantCookie);
+      const again = await authorizeAgain(owner);
+      const page = await owner.fetch(again);
+      assert.equal(page.status, 200);
+      assert.match(await page.text(), /Verbunden \(Key …y-a2\)/, "same grant, same accounts");
+      assert.equal((await owner.post(`${again}/cancel`)).status, 303);
+    });
   });
 });

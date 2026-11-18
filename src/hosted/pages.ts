@@ -39,6 +39,8 @@ details { margin-top:24px; color:var(--muted); font-size:13px; }
 .hint { color:var(--muted); font-size:13px; }
 .consent { padding:14px 16px; margin:16px 0 20px; border-color:var(--accent); }
 .consent p { margin:0 0 8px; } .consent p:last-child { margin-bottom:0; }
+.consent.warning { border:2px solid var(--warn); }
+.consent.warning .title { color:var(--warn); font-weight:600; }
 `;
 
 let iconLink = "";
@@ -59,7 +61,7 @@ const formatDate = (seconds: number): string =>
 
 export type ConnectMode = "apikey" | "oauth";
 
-/** Hidden form field carrying the CSRF token (checked against a SameSite=Strict cookie). */
+/** Hidden form field carrying the CSRF token (bound to this browser's nonce cookie). */
 const csrfField = (token: string): string => `<input type="hidden" name="csrf" value="${escape(token)}">`;
 
 /** Who receives the access, in words a person can check. */
@@ -83,6 +85,20 @@ function consentBox(client: { name?: string | undefined; redirectUri: string }):
       <p>Mit „Fertig“ geht der Zugriff an:<br>${describeTarget(client.redirectUri)}</p>
       <p class="hint">Den Namen gibt die App selbst an, er ist nicht geprüft – entscheidend ist die Adresse.
       Hast du diese Verbindung nicht selbst in Claude gestartet, klicke auf „Abbrechen“ und verbinde nichts.</p>
+    </div>`;
+}
+
+/**
+ * Shown on pages reached from a manage link: such a link can be forwarded, and
+ * whatever the recipient connects lands in the sender's Claude access.
+ */
+function manageWarning(): string {
+  return `<div class="card consent warning">
+      <p class="title">Achtung: Diese Seite verwaltet einen bestehenden Claude-Zugang</p>
+      <p>Hier verwaltest du die easybill-Verbindungen des Claude-Zugangs, von dem dieser Link stammt.
+      Nutze die Seite nur, wenn Claude dir diesen Link in <b>deinem eigenen Chat</b> gegeben hat.</p>
+      <p>Hat dir jemand diesen Link geschickt, schließe die Seite und verbinde nichts – alles, was du hier verbindest,
+      kann diese Person über Claude nutzen.</p>
     </div>`;
 }
 
@@ -128,7 +144,7 @@ export interface ConnectPageInput {
   /** Who is looking, when Cloudflare Access is in front (their e-mail). */
   viewer?: string;
   session: SessionRow;
-  /** CSRF token for the forms; the same value is set as a SameSite=Strict cookie. */
+  /** CSRF token for the forms, bound to the browser's nonce cookie. */
   csrfToken: string;
   /** The MCP client asking for access (authorize sessions only). */
   client?: { name?: string | undefined; redirectUri: string };
@@ -170,6 +186,7 @@ export function renderConnectPage({
     "easybill verbinden",
     `<h1>easybill-Accounts verbinden</h1>
     ${session.kind === "authorize" && client ? consentBox(client) : ""}
+    ${session.kind === "manage" ? manageWarning() : ""}
     <p class="lead">Verbinde jeden Account, auf den du Zugriff hast, ${
       mode === "apikey" ? "mit deinem persönlichen easybill-API-Key" : "mit deinem eigenen easybill-Login"
     }.
@@ -197,6 +214,7 @@ export function renderKeyForm(session: SessionRow, tenant: TenantConfig, csrfTok
     `${tenant.name} verbinden`,
     `<h1>„${escape(tenant.name)}“ verbinden</h1>
     <p class="lead">Füge deinen persönlichen API-Key aus diesem easybill-Account ein.</p>
+    ${session.kind === "manage" ? manageWarning() : ""}
     ${error ? `<div class="banner error">${escape(error)}</div>` : ""}
     <div class="card" style="padding:16px">
       <ol style="margin:0 0 16px; padding-left:20px">

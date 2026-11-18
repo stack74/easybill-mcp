@@ -72,7 +72,7 @@ export interface CodeRow {
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS oauth_clients (client_id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS grants (id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS grants (id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL, owner TEXT);
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY, kind TEXT NOT NULL, grant_id TEXT NOT NULL, client_id TEXT, redirect_uri TEXT,
   code_challenge TEXT, state TEXT, resource TEXT, expires_at INTEGER NOT NULL);
@@ -102,11 +102,18 @@ export class Store {
     this.db = new DatabaseSync(dbPath);
     this.db.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;");
     this.db.exec(SCHEMA);
+    this.migrate();
     this.key = Buffer.from(hkdfSync("sha256", secret, "easybill-mcp", "token-encryption", 32));
   }
 
   close(): void {
     this.db.close();
+  }
+
+  /** Brings databases created by older versions up to the current schema. */
+  private migrate(): void {
+    const grantColumns = this.db.prepare("PRAGMA table_info(grants)").all() as { name: string }[];
+    if (!grantColumns.some((c) => c.name === "owner")) this.db.exec("ALTER TABLE grants ADD COLUMN owner TEXT");
   }
 
   // --- encryption --------------------------------------------------------
@@ -176,6 +183,20 @@ export class Store {
 
   touchGrant(id: string): void {
     this.db.prepare("UPDATE grants SET last_used_at = ? WHERE id = ?").run(nowSeconds(), id);
+  }
+
+  /**
+   * The person a grant belongs to (Cloudflare Access e-mail, lower-cased), or
+   * null when not known: grants from before owners were recorded, or without Access.
+   */
+  getGrantOwner(id: string): string | null {
+    const row = this.db.prepare("SELECT owner FROM grants WHERE id = ?").get(id) as { owner: string | null } | undefined;
+    return row?.owner ?? null;
+  }
+
+  /** Records the owner unless the grant already has one; an owner never changes. */
+  claimGrantOwner(id: string, owner: string): void {
+    this.db.prepare("UPDATE grants SET owner = ? WHERE id = ? AND owner IS NULL").run(owner.trim().toLowerCase(), id);
   }
 
   // --- connect-page sessions --------------------------------------------

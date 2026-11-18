@@ -11,7 +11,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { createRemoteJWKSet, jwtVerify } from "jose";
@@ -244,24 +244,86 @@ export async function createHostedApp(config: HostedConfig): Promise<HostedApp> 
       );
   };
 
+  const refuse = (res: Response, title: string, text: string): void => {
+    pageHeaders(res);
+    res.status(403).type("html").send(renderMessage(title, text));
+  };
+
+  /**
+   * Is this browser allowed to act on the session? Two checks against connect
+   * links that reach someone else (a forwarded manage link, a link from someone
+   * who started /authorize themselves):
+   *
+   *  - Grant cookie: a browser that already finished a connection carries its
+   *    grant. A link of a different grant is refused — whatever this person
+   *    connected there would land in someone else's Claude access. authorize()
+   *    reuses the cookie's grant, so a connection started in this browser always
+   *    passes.
+   *  - Owner (Cloudflare Access only): a grant remembers who finished its first
+   *    authorization; only that person may open its links.
+   */
+  const allowedHere = (req: Request, res: Response, session: SessionRow): boolean => {
+    const remembered = cookie.read(req);
+    if (remembered && remembered !== session.grant_id && store.grantExists(remembered)) {
+      console.error(`Connect page refused: ${session.kind} link of another grant than the browser's grant cookie`);
+      refuse(
+        res,
+        "Link gehört zu einem anderen Zugang",
+        "Dieser Link gehört zu einem anderen Claude-Zugang als dem, der in diesem Browser verbunden ist. " +
+          "Verbinde hier nichts: Was du hier verbindest, könnte jemand anderes nutzen. " +
+          "Hat dir jemand diesen Link geschickt, schließe die Seite. Ist es dein eigener Link, öffne ihn in dem Browser, " +
+          "in dem du easybill mit Claude verbunden hast.",
+      );
+      return false;
+    }
+    if (access) {
+      const owner = store.getGrantOwner(session.grant_id);
+      const viewer = viewerOf(res)?.trim().toLowerCase();
+      if (owner && viewer !== owner) {
+        console.error(`Connect page refused: ${session.kind} link of a grant owned by someone else (viewer ${viewer ?? "unknown"})`);
+        refuse(
+          res,
+          "Kein Zugriff",
+          "Dieser Link gehört zum Claude-Zugang einer anderen Person. Verbinde hier nichts und schließe die Seite. " +
+            "Deinen eigenen Link bekommst du von Claude in deinem eigenen Chat (easybill_list_accounts).",
+        );
+        return false;
+      }
+    }
+    return true;
+  };
+
+  /** Loads the session of /connect/:sid/… and checks this browser may use it; answers the request otherwise. */
   const loadSession = (req: Request, res: Response): SessionRow | undefined => {
     const session = store.getSession(String(req.params.sid));
-    if (!session) expired(res);
-    return session;
+    if (!session) {
+      expired(res);
+      return undefined;
+    }
+    return allowedHere(req, res, session) ? session : undefined;
   };
 
   // --- CSRF ------------------------------------------------------------------
   //
   // Whoever has a connect link knows its session id, so a foreign page could
   // otherwise submit the connect page's forms (connect, key, disconnect, finish,
-  // cancel) in the person's browser. Every page of a session sets a
-  // SameSite=Strict cookie and puts the same token into each form; a POST must
-  // carry both. A cross-site form post never carries the Strict cookie. The token
-  // is derived from the session id with the server secret, so it needs no storage.
+  // cancel) in the person's browser. Each browser gets a random nonce in an
+  // HttpOnly cookie; the forms carry HMAC(secret, sid + nonce). A POST must carry
+  // the cookie and the token that matches it.
+  //
+  // Someone who opens the page themselves only gets a token for their own nonce;
+  // they can neither read the victim's nonce nor compute the HMAC without the
+  // secret. Over https the cookie has the __Host- prefix, so a sibling subdomain
+  // (same site, so SameSite does not help) cannot plant a nonce of its choosing.
+  // SameSite=Lax keeps the cookie on the top-level navigation from claude.ai and
+  // easybill and off cross-site POSTs.
 
-  const CSRF_COOKIE = "easybill_mcp_csrf";
-  const csrfToken = (sid: string): string => createHmac("sha256", config.secret).update(`csrf:${sid}`).digest("base64url");
-  const csrfCookiePath = (sid: string): string => `/connect/${encodeURIComponent(sid)}`;
+  const secureCookies = config.publicUrl.protocol === "https:";
+  const BROWSER_COOKIE = secureCookies ? "__Host-easybill_mcp_browser" : "easybill_mcp_browser";
+  const BROWSER_COOKIE_MAX_AGE = 24 * 3600;
+  const wellFormedNonce = (value: string | undefined): value is string => typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
+  const csrfToken = (sid: string, nonce: string): string =>
+    createHmac("sha256", config.secret).update(`csrf:${sid}:${nonce}`).digest("base64url");
 
   const readCookie = (req: Request, name: string): string | undefined => {
     for (const part of (req.headers.cookie ?? "").split(";")) {
@@ -281,39 +343,36 @@ export async function createHostedApp(config: HostedConfig): Promise<HostedApp> 
     return x.length === y.length && timingSafeEqual(x, y);
   };
 
-  /** Sets the CSRF cookie for a session's pages and returns the token for the forms. */
-  const issueCsrf = (res: Response, session: SessionRow): string => {
-    const token = csrfToken(session.id);
-    res.cookie(CSRF_COOKIE, token, {
-      httpOnly: true,
-      secure: config.publicUrl.protocol === "https:",
-      sameSite: "strict",
-      path: csrfCookiePath(session.id),
-      maxAge: SESSION_TTL_SECONDS * 1000,
-    });
-    return token;
+  /** The browser's nonce, set as cookie if it has none yet; returns the form token for the session. */
+  const issueCsrf = (req: Request, res: Response, session: SessionRow): string => {
+    let nonce = readCookie(req, BROWSER_COOKIE);
+    if (!wellFormedNonce(nonce)) {
+      nonce = randomBytes(32).toString("base64url");
+      res.cookie(BROWSER_COOKIE, nonce, {
+        httpOnly: true,
+        secure: secureCookies,
+        sameSite: "lax",
+        path: "/",
+        maxAge: BROWSER_COOKIE_MAX_AGE * 1000,
+      });
+    }
+    return csrfToken(session.id, nonce);
   };
 
   const formBody = express.urlencoded({ extended: false, limit: "4kb" });
 
-  /** For every POST under /connect/:sid/…: cookie, form field and expected token must agree. */
+  /** For every POST under /connect/:sid/…: the form token must match this browser's nonce cookie. */
   const requireCsrf = (req: Request, res: Response, next: NextFunction): void => {
-    const expected = csrfToken(String(req.params.sid));
+    const nonce = readCookie(req, BROWSER_COOKIE);
     const field = typeof req.body?.csrf === "string" ? req.body.csrf : "";
-    const cookieValue = readCookie(req, CSRF_COOKIE) ?? "";
-    if (sameToken(field, expected) && sameToken(cookieValue, expected)) return next();
+    if (wellFormedNonce(nonce) && sameToken(field, csrfToken(String(req.params.sid), nonce))) return next();
     console.error(`Connect page: ${req.method} ${req.path.replace(/^\/connect\/[^/]+/, "/connect/…")} refused, CSRF token missing or wrong`);
-    pageHeaders(res);
-    res
-      .status(403)
-      .type("html")
-      .send(
-        renderMessage(
-          "Nicht bestätigt",
-          "Diese Aktion konnte nicht bestätigt werden. Öffne die Verbindungsseite erneut (Cookies müssen erlaubt sein) " +
-            "oder starte die Verbindung in Claude neu.",
-        ),
-      );
+    refuse(
+      res,
+      "Nicht bestätigt",
+      "Diese Aktion konnte nicht bestätigt werden. Öffne die Verbindungsseite erneut (Cookies müssen erlaubt sein) " +
+        "oder starte die Verbindung in Claude neu.",
+    );
   };
 
   const backToPage = (res: Response, session: SessionRow, kind: "e" | "n", code: string, tenantId?: string): void => {
@@ -376,7 +435,7 @@ export async function createHostedApp(config: HostedConfig): Promise<HostedApp> 
       typeof key === "string" && MESSAGES[key] ? MESSAGES[key](tenant) : undefined;
     const error = message(req.query.e);
     const notice = message(req.query.n);
-    const csrf = issueCsrf(res, session);
+    const csrf = issueCsrf(req, res, session);
     // Which app asks and where the access goes: the person must see this before
     // connecting anything, the link may come from someone else.
     const client =
@@ -416,7 +475,7 @@ export async function createHostedApp(config: HostedConfig): Promise<HostedApp> 
     if (!session) return;
     const tenant = tenantById.get(String(req.params.tid));
     if (!tenant || config.connectMode !== "apikey") return expired(res);
-    const csrf = issueCsrf(res, session);
+    const csrf = issueCsrf(req, res, session);
     pageHeaders(res);
     res.type("html").send(renderKeyForm(session, tenant, csrf));
   });
@@ -428,7 +487,7 @@ export async function createHostedApp(config: HostedConfig): Promise<HostedApp> 
     if (!tenant || config.connectMode !== "apikey") return expired(res);
     const fail = (message: string): void => {
       pageHeaders(res);
-      res.status(400).type("html").send(renderKeyForm(session, tenant, csrfToken(session.id), message));
+      res.status(400).type("html").send(renderKeyForm(session, tenant, issueCsrf(req, res, session), message));
     };
 
     const key = typeof req.body?.api_key === "string" ? req.body.api_key.trim() : "";
@@ -508,6 +567,11 @@ export async function createHostedApp(config: HostedConfig): Promise<HostedApp> 
       .listConnections(session.grant_id)
       .filter((c) => !c.broken_reason && tenantById.has(c.tenant_id));
     if (usable.length === 0) return backToPage(res, session, "e", "none_connected");
+    // Behind Cloudflare Access the grant belongs to whoever finished its first
+    // authorization; its connect links then only open for them. Never from a
+    // manage link (handled above): that link may have been forwarded.
+    const viewer = viewerOf(res);
+    if (access && viewer) store.claimGrantOwner(session.grant_id, viewer);
     cookie.write(res, session.grant_id);
     res.redirect(303, provider.completeAuthorization(session));
   });

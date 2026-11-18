@@ -1,6 +1,6 @@
 {
   "name": "easybill-mcp",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "MCP server for the easybill REST API (invoices, customers, articles, payments, time tracking)",
   "type": "module",
   "main": "dist/index.js",

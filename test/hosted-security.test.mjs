@@ -7,7 +7,8 @@
  * colleague connects their easybill accounts and presses "Fertig", the code
  * would go to the attacker. Guarded by a redirect allowlist (registration and
  * /authorize), by the connect page naming the app and the redirect target, and
- * by CSRF tokens on every form, so a foreign page cannot submit them.
+ * by CSRF tokens bound to the browser on every form, so a foreign page — or
+ * someone who opened the same link in their own browser — cannot submit them.
  */
 
 import assert from "node:assert/strict";
@@ -18,7 +19,9 @@ import http from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
-import { csrfFor, submitForm } from "./helpers/connect-form.mjs";
+import { DatabaseSync } from "node:sqlite";
+import { Store } from "../dist/hosted/store.js";
+import { Browser } from "./helpers/connect-form.mjs";
 import { SERVER_ENTRY } from "./helpers/mcp-client.mjs";
 
 const LOOPBACK = "http://localhost:9999/callback";
@@ -218,55 +221,117 @@ describe("hosted mode: who may receive the access (confused deputy)", () => {
 });
 
 describe("hosted mode: CSRF on the connect page", () => {
-  it("binds every form to a SameSite=Strict cookie and refuses posts without it", async () => {
+  it("binds every form to a per-browser nonce cookie and refuses posts without it", async () => {
     const server = await startHosted();
     try {
       const connectPath = await beginAuthorization(server.base);
       const page = await fetch(new URL(connectPath, server.base));
       const html = await page.text();
-      const setCookie = page.headers.get("set-cookie") ?? "";
-      assert.match(setCookie, /^easybill_mcp_csrf=/);
-      assert.match(setCookie, /HttpOnly/i);
-      assert.match(setCookie, /SameSite=Strict/i);
-      assert.match(setCookie, new RegExp(`Path=${connectPath.replace(/[/]/g, "\\/")}(;|$)`));
-      assert.doesNotMatch(setCookie, /Secure/i, "plain http on localhost: no Secure flag");
+      const setCookie = page.headers.getSetCookie();
+      assert.equal(setCookie.length, 1, "only the browser cookie");
+      assert.match(setCookie[0], /^easybill_mcp_browser=[A-Za-z0-9_-]{43};/, "plain name over http");
+      assert.match(setCookie[0], /HttpOnly/i);
+      assert.match(setCookie[0], /SameSite=Lax/i);
+      assert.match(setCookie[0], /Path=\/(;|$)/);
+      assert.doesNotMatch(setCookie[0], /Secure/i, "plain http on localhost: no Secure flag");
+      assert.doesNotMatch(setCookie[0], /Domain=/i);
       // Every POST form carries the token.
       const postForms = html.match(/<form method="post"[^>]*>/g) ?? [];
       const withToken = html.match(/<form method="post"[^>]*><input type="hidden" name="csrf"|<form method="post"[^>]*>\s*<input type="hidden" name="csrf"/g) ?? [];
       assert.ok(postForms.length >= 2, "cancel and finish at least");
       assert.equal(withToken.length, postForms.length, "every POST form carries the CSRF token");
 
-      const { cookie, csrf } = await csrfFor(server.base, connectPath);
-      const post = (p, { withCookie = true, token = csrf } = {}) =>
-        fetch(new URL(p, server.base), {
-          method: "POST",
-          redirect: "manual",
-          headers: { "Content-Type": "application/x-www-form-urlencoded", ...(withCookie ? { Cookie: cookie } : {}) },
-          body: new URLSearchParams(token === null ? {} : { csrf: token }),
-        });
+      const victim = new Browser(server.base);
+      const csrf = await victim.csrf(connectPath);
+      // The browser keeps its nonce: a second visit sets no new cookie and renders the same token.
+      const again = await victim.fetch(connectPath);
+      assert.deepEqual(again.headers.getSetCookie(), []);
+      assert.equal(/name="csrf" value="([^"]+)"/.exec(await again.text())[1], csrf);
 
-      // A cross-site form post knows the session id (and at best the token from the page), never the Strict cookie.
+      const anonymous = new Browser(server.base);
+      // A cross-site form post knows the session id (and at best a token), never the cookie.
       for (const p of ["finish", "cancel", "tenants/alpha/key", "tenants/alpha/disconnect", "tenants/alpha/connect"]) {
-        const res = await post(`${connectPath}/${p}`, { withCookie: false });
+        const res = await anonymous.post(`${connectPath}/${p}`, {}, csrf);
         assert.equal(res.status, 403, `${p} without cookie`);
         assert.equal(res.headers.get("location"), null, `${p} must not redirect`);
         assert.match(await res.text(), /nicht bestätigt werden/);
       }
-      assert.equal((await post(`${connectPath}/finish`, { token: null })).status, 403, "cookie but no field");
-      assert.equal((await post(`${connectPath}/finish`, { token: `${csrf.slice(0, -1)}x` })).status, 403, "wrong field");
+      assert.equal((await victim.post(`${connectPath}/finish`, {}, null)).status, 403, "cookie but no field");
+      assert.equal((await victim.post(`${connectPath}/finish`, {}, `${csrf.slice(0, -1)}x`)).status, 403, "wrong field");
+      const malformed = new Browser(server.base, { easybill_mcp_browser: "short" });
+      assert.equal((await malformed.post(`${connectPath}/finish`, {}, csrf)).status, 403, "malformed cookie");
       // A token of another session does not help.
-      const other = await csrfFor(server.base, await beginAuthorization(server.base));
-      assert.equal((await post(`${connectPath}/cancel`, { token: other.csrf })).status, 403, "token of another session");
+      const otherSession = await victim.csrf(await beginAuthorization(server.base));
+      assert.equal((await victim.post(`${connectPath}/cancel`, {}, otherSession)).status, 403, "token of another session");
 
       // The session is untouched and still works with the right cookie and token.
-      const finish = await submitForm(server.base, `${connectPath}/finish`);
+      const finish = await victim.post(`${connectPath}/finish`);
       assert.equal(finish.status, 303);
       assert.match(finish.headers.get("location"), /e=none_connected/);
-      const cancel = await submitForm(server.base, `${connectPath}/cancel`);
+      const cancel = await victim.post(`${connectPath}/cancel`, {}, csrf);
       assert.equal(cancel.status, 303);
       const target = new URL(cancel.headers.get("location"));
       assert.equal(`${target.origin}${target.pathname}`, LOOPBACK);
       assert.equal(target.searchParams.get("error"), "access_denied");
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("refuses a token that was rendered for another browser", async () => {
+    const server = await startHosted();
+    try {
+      const connectPath = await beginAuthorization(server.base);
+      const victim = new Browser(server.base);
+      const victimToken = await victim.csrf(connectPath);
+      const other = new Browser(server.base);
+      const otherToken = await other.csrf(connectPath);
+      assert.notEqual(victimToken, otherToken, "the token depends on the browser, not only on the session");
+      assert.notEqual(victim.browserCookie, other.browserCookie);
+
+      // A token copied from another browser does not fit this browser's cookie.
+      assert.equal((await other.post(`${connectPath}/finish`, {}, victimToken)).status, 403);
+      // The attacker scenario: someone who knows the link (and so can open the page) takes the
+      // token rendered for their own browser and makes the victim's browser post it — e.g. from a
+      // sibling subdomain, which is same-site, so the victim's cookie is sent along.
+      const attack = await victim.post(`${connectPath}/cancel`, {}, otherToken);
+      assert.equal(attack.status, 403);
+      assert.equal(attack.headers.get("location"), null);
+      // Planting a cookie of the attacker's choosing would make their token fit — over https
+      // the __Host- prefix rules that out (see the next test); the session is unharmed here.
+      const finish = await victim.post(`${connectPath}/finish`, {}, victimToken);
+      assert.equal(finish.status, 303);
+      assert.match(finish.headers.get("location"), /e=none_connected/, "still the same, working session");
+    } finally {
+      await server.stop();
+    }
+  });
+
+  it("uses a __Host- cookie (Secure, Path=/, no Domain) when the public URL is https", async () => {
+    const port = await freePort();
+    const server = await startHosted({ EASYBILL_PUBLIC_URL: `https://127.0.0.1:${port}` }, { port });
+    try {
+      // The server sits behind TLS termination; the test talks to it directly over http.
+      const connectPath = await beginAuthorization(server.base);
+      const page = await fetch(new URL(connectPath, server.base));
+      assert.equal(page.status, 200);
+      const [setCookie, ...more] = page.headers.getSetCookie();
+      assert.equal(more.length, 0);
+      assert.match(setCookie, /^__Host-easybill_mcp_browser=[A-Za-z0-9_-]{43};/);
+      assert.match(setCookie, /;\s*Secure(;|$)/i);
+      assert.match(setCookie, /;\s*Path=\/(;|$)/);
+      assert.match(setCookie, /HttpOnly/i);
+      assert.match(setCookie, /SameSite=Lax/i);
+      assert.doesNotMatch(setCookie, /Domain=/i);
+
+      // The forms work with that cookie, and only with that name.
+      const browser = new Browser(server.base);
+      const csrf = await browser.csrf(connectPath);
+      const nonce = browser.browserCookie.split("=")[1];
+      const plain = new Browser(server.base, { easybill_mcp_browser: nonce });
+      assert.equal((await plain.post(`${connectPath}/finish`, {}, csrf)).status, 403, "the unprefixed name is not read over https");
+      const finish = await browser.post(`${connectPath}/finish`, {}, csrf);
+      assert.equal(finish.status, 303);
     } finally {
       await server.stop();
     }
@@ -278,10 +343,41 @@ describe("hosted mode: CSRF on the connect page", () => {
       const connectPath = await beginAuthorization(server.base);
       const form = await fetch(new URL(`${connectPath}/tenants/alpha/key`, server.base));
       assert.equal(form.status, 200);
-      assert.match(form.headers.get("set-cookie") ?? "", /^easybill_mcp_csrf=.*SameSite=Strict/i);
-      assert.match(await form.text(), /name="csrf" value="[^"]+"/);
+      assert.match(form.headers.get("set-cookie") ?? "", /^easybill_mcp_browser=.*SameSite=Lax/i);
+      const html = await form.text();
+      assert.match(html, /name="csrf" value="[^"]+"/);
+      assert.doesNotMatch(html, /verwaltet einen bestehenden Claude-Zugang/, "no manage warning during an authorization");
     } finally {
       await server.stop();
+    }
+  });
+});
+
+describe("hosted mode: grant owners in the database", () => {
+  it("adds the owner column to a database from an older version", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "easybill-mcp-migrate-"));
+    try {
+      const file = path.join(dir, "db.sqlite");
+      const old = new DatabaseSync(file);
+      old.exec("CREATE TABLE grants (id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL)");
+      old.prepare("INSERT INTO grants (id, created_at, last_used_at) VALUES ('g-old', 1, 1)").run();
+      old.close();
+
+      const store = new Store(file, "test-secret-test-secret-test-secret-1234");
+      try {
+        assert.equal(store.grantExists("g-old"), true, "existing grants survive");
+        assert.equal(store.getGrantOwner("g-old"), null, "old grants have no owner");
+        store.claimGrantOwner("g-old", " Erika@Example.com ");
+        assert.equal(store.getGrantOwner("g-old"), "erika@example.com");
+        store.claimGrantOwner("g-old", "max@example.com");
+        assert.equal(store.getGrantOwner("g-old"), "erika@example.com", "an owner is never replaced");
+      } finally {
+        store.close();
+      }
+      // Opening it again does not migrate twice.
+      new Store(file, "test-secret-test-secret-test-secret-1234").close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });
