@@ -14,6 +14,7 @@ import http from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
+import { submitForm } from "./helpers/connect-form.mjs";
 import { SERVER_ENTRY } from "./helpers/mcp-client.mjs";
 
 /** Companies and their logins. Login IDs are unique across easybill. */
@@ -97,13 +98,8 @@ describe("hosted mode with personal API keys", () => {
   const challenge = createHash("sha256").update(verifier).digest("base64url");
 
   const get = (p) => fetch(new URL(p, base), { redirect: "manual" });
-  const postForm = (p, fields = {}) =>
-    fetch(new URL(p, base), {
-      method: "POST",
-      redirect: "manual",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams(fields),
-    });
+  /** A connect-page form post, with the CSRF cookie and field a browser would send. */
+  const postForm = (p, fields = {}) => submitForm(base, p, fields);
 
   async function submitKey(tenant, key) {
     const form = await get(`${sessionPath}/tenants/${tenant}/key`);

@@ -15,6 +15,7 @@ import http from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
+import { submitForm } from "./helpers/connect-form.mjs";
 import { SERVER_ENTRY } from "./helpers/mcp-client.mjs";
 
 const b64url = (value) => Buffer.from(value).toString("base64url");
@@ -162,10 +163,12 @@ describe("hosted mode (HTTP + OAuth)", () => {
   const get = (p, headers = {}) => fetch(new URL(p, base), { redirect: "manual", headers });
   const post = (p, headers = {}, body) => fetch(new URL(p, base), { method: "POST", redirect: "manual", headers, body });
   const location = (res) => res.headers.get("location");
+  /** A connect-page form post, with the CSRF cookie and field a browser would send. */
+  const submit = (p, fields) => submitForm(base, p, fields);
 
   /** Clicks "Verbinden" for a tenant and logs in at the fake easybill as `login`. */
   async function connectTenant(tenant, login) {
-    const start = await post(`${sessionPath}/tenants/${tenant}/connect`);
+    const start = await submit(`${sessionPath}/tenants/${tenant}/connect`);
     assert.equal(start.status, 303);
     const upstreamAuthorize = new URL(location(start));
     assert.equal(upstreamAuthorize.origin, fake.base);
@@ -306,7 +309,7 @@ describe("hosted mode (HTTP + OAuth)", () => {
   });
 
   it("refuses to finish before any account is connected", async () => {
-    const res = await post(`${sessionPath}/finish`);
+    const res = await submit(`${sessionPath}/finish`);
     assert.equal(res.status, 303);
     assert.match(location(res), /e=none_connected/);
   });
@@ -337,7 +340,7 @@ describe("hosted mode (HTTP + OAuth)", () => {
   });
 
   it("hands the MCP client an authorization code on finish and exchanges it for tokens", async () => {
-    const res = await post(`${sessionPath}/finish`);
+    const res = await submit(`${sessionPath}/finish`);
     assert.equal(res.status, 303);
     const target = new URL(location(res));
     assert.equal(`${target.origin}${target.pathname}`, redirectUri);

@@ -7,6 +7,7 @@
  */
 
 import { readFileSync } from "node:fs";
+import { DEFAULT_REDIRECT_PATTERNS, RedirectPolicy } from "./redirects.js";
 
 /**
  * easybill plans with REST API access and their request limits (easybill.de/preise).
@@ -88,6 +89,8 @@ export interface HostedConfig {
    * answers requests carrying a valid Access token for this application.
    */
   cloudflareAccess?: { issuer: string; audience: string };
+  /** Redirect URIs MCP clients may register (see redirects.ts). */
+  redirects: RedirectPolicy;
   /**
    * Icon served as favicon and announced in the MCP server info, read from a
    * file outside the image (e.g. a Coolify file mount). claude.ai shows the
@@ -165,6 +168,12 @@ function parseTenants(raw: string, source: string): TenantConfig[] {
     return { id, name, writes, rateLimitPerMinute, scopes, ...(match ? { match } : {}) };
   });
 }
+
+const list = (raw: string | undefined): string[] =>
+  (raw ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
 
 function intEnv(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
   const raw = env[name];
@@ -246,6 +255,20 @@ export function loadHostedConfig(env: NodeJS.ProcessEnv = process.env): HostedCo
     icon = { path: iconPath, mimeType, extension };
   }
 
+  let redirects: RedirectPolicy;
+  // Extra entries extend the built-in list (claude.ai, claude.com, loopback);
+  // EASYBILL_DEFAULT_REDIRECT_URIS=false drops the built-ins.
+  const withDefaults = !/^(0|false|no)$/i.test(env.EASYBILL_DEFAULT_REDIRECT_URIS?.trim() ?? "");
+  const redirectSources = [...(withDefaults ? DEFAULT_REDIRECT_PATTERNS : []), ...list(env.EASYBILL_ALLOWED_REDIRECT_URIS)];
+  if (redirectSources.length === 0) {
+    fail("no redirect URIs allowed: set EASYBILL_ALLOWED_REDIRECT_URIS when EASYBILL_DEFAULT_REDIRECT_URIS=false");
+  }
+  try {
+    redirects = new RedirectPolicy(redirectSources);
+  } catch (error) {
+    fail(`EASYBILL_ALLOWED_REDIRECT_URIS: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
   return {
     publicUrl,
     mcpUrl: new URL(`${publicUrl.href.replace(/\/+$/, "")}/mcp`),
@@ -261,6 +284,7 @@ export function loadHostedConfig(env: NodeJS.ProcessEnv = process.env): HostedCo
       ...(clientSecret ? { clientSecret } : {}),
     },
     ...(cloudflareAccess ? { cloudflareAccess } : {}),
+    redirects,
     ...(icon ? { icon } : {}),
     accessTokenTtlSeconds: intEnv(env, "EASYBILL_MCP_ACCESS_TOKEN_TTL", 3600),
     refreshTokenTtlSeconds: intEnv(env, "EASYBILL_MCP_REFRESH_TOKEN_TTL", 90 * 24 * 3600),

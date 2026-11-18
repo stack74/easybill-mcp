@@ -36,6 +36,9 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 .banner.error { border-color:var(--danger); color:var(--danger); }
 .banner.notice { border-color:var(--ok); color:var(--ok); }
 details { margin-top:24px; color:var(--muted); font-size:13px; }
+.hint { color:var(--muted); font-size:13px; }
+.consent { padding:14px 16px; margin:16px 0 20px; border-color:var(--accent); }
+.consent p { margin:0 0 8px; } .consent p:last-child { margin-bottom:0; }
 `;
 
 let iconLink = "";
@@ -56,11 +59,39 @@ const formatDate = (seconds: number): string =>
 
 export type ConnectMode = "apikey" | "oauth";
 
+/** Hidden form field carrying the CSRF token (checked against a SameSite=Strict cookie). */
+const csrfField = (token: string): string => `<input type="hidden" name="csrf" value="${escape(token)}">`;
+
+/** Who receives the access, in words a person can check. */
+function describeTarget(redirectUri: string): string {
+  try {
+    const url = new URL(redirectUri);
+    if (["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)) {
+      return `eine App auf <b>deinem eigenen Computer</b> (${escape(url.host)}), z.&nbsp;B. Claude Code oder Claude Desktop`;
+    }
+    return `<b>${escape(url.host)}</b> <span class="hint">${escape(url.pathname)}</span>`;
+  } catch {
+    return escape(redirectUri);
+  }
+}
+
+/** The consent part of the connect page: which app asks and where the access goes. */
+function consentBox(client: { name?: string | undefined; redirectUri: string }): string {
+  const name = client.name?.trim() ? `„${escape(client.name.trim().slice(0, 100))}“` : "Eine App ohne Namen";
+  return `<div class="card consent">
+      <p><b>${name}</b> möchte Zugriff auf die easybill-Accounts, die du hier verbindest – mit deinen Rechten.</p>
+      <p>Mit „Fertig“ geht der Zugriff an:<br>${describeTarget(client.redirectUri)}</p>
+      <p class="hint">Den Namen gibt die App selbst an, er ist nicht geprüft – entscheidend ist die Adresse.
+      Hast du diese Verbindung nicht selbst in Claude gestartet, klicke auf „Abbrechen“ und verbinde nichts.</p>
+    </div>`;
+}
+
 function tenantRow(
   sessionId: string,
   tenant: TenantConfig,
   connection: ConnectionRow | undefined,
   mode: ConnectMode,
+  csrf: string,
 ): string {
   const base = `/connect/${encodeURIComponent(sessionId)}/tenants/${encodeURIComponent(tenant.id)}`;
   const badge = `<span class="badge">${tenant.writes ? "Lesen &amp; Schreiben" : "Nur lesen"}</span>`;
@@ -68,8 +99,8 @@ function tenantRow(
   const connectButton = (label: string, primary: boolean): string =>
     mode === "apikey"
       ? `<form method="get" action="${base}/key"><button${primary ? ' class="primary"' : ""}>${label}</button></form>`
-      : `<form method="post" action="${base}/connect"><button${primary ? ' class="primary"' : ""}>${label}</button></form>`;
-  const disconnect = `<form method="post" action="${base}/disconnect"><button class="link">Trennen</button></form>`;
+      : `<form method="post" action="${base}/connect">${csrfField(csrf)}<button${primary ? ' class="primary"' : ""}>${label}</button></form>`;
+  const disconnect = `<form method="post" action="${base}/disconnect">${csrfField(csrf)}<button class="link">Trennen</button></form>`;
   let status: string;
   let actions: string;
   if (!connection) {
@@ -97,13 +128,27 @@ export interface ConnectPageInput {
   /** Who is looking, when Cloudflare Access is in front (their e-mail). */
   viewer?: string;
   session: SessionRow;
+  /** CSRF token for the forms; the same value is set as a SameSite=Strict cookie. */
+  csrfToken: string;
+  /** The MCP client asking for access (authorize sessions only). */
+  client?: { name?: string | undefined; redirectUri: string };
   tenants: TenantConfig[];
   connections: ConnectionRow[];
   error?: string;
   notice?: string;
 }
 
-export function renderConnectPage({ mode, viewer, session, tenants, connections, error, notice }: ConnectPageInput): string {
+export function renderConnectPage({
+  mode,
+  viewer,
+  session,
+  csrfToken,
+  client,
+  tenants,
+  connections,
+  error,
+  notice,
+}: ConnectPageInput): string {
   const byTenant = new Map(connections.map((c) => [c.tenant_id, c]));
   const usable = connections.filter((c) => !c.broken_reason && tenants.some((t) => t.id === c.tenant_id)).length;
   const sid = encodeURIComponent(session.id);
@@ -116,21 +161,22 @@ export function renderConnectPage({ mode, viewer, session, tenants, connections,
     session.kind === "authorize"
       ? `<div class="footer">
           <span class="hint">${usable === 0 ? "Verbinde mindestens einen Account." : `${usable} Account${usable === 1 ? "" : "s"} verbunden.`}</span>
-          <form method="post" action="/connect/${sid}/cancel"><button>Abbrechen</button></form>
-          <form method="post" action="/connect/${sid}/finish"><button class="primary"${usable === 0 ? " disabled" : ""}>Fertig – zurück zu Claude</button></form>
+          <form method="post" action="/connect/${sid}/cancel">${csrfField(csrfToken)}<button>Abbrechen</button></form>
+          <form method="post" action="/connect/${sid}/finish">${csrfField(csrfToken)}<button class="primary"${usable === 0 ? " disabled" : ""}>Fertig – zurück zu Claude</button></form>
         </div>`
-      : `<div class="footer"><form method="post" action="/connect/${sid}/finish"><button class="primary">Fertig</button></form></div>`;
+      : `<div class="footer"><form method="post" action="/connect/${sid}/finish">${csrfField(csrfToken)}<button class="primary">Fertig</button></form></div>`;
 
   return layout(
     "easybill verbinden",
     `<h1>easybill-Accounts verbinden</h1>
+    ${session.kind === "authorize" && client ? consentBox(client) : ""}
     <p class="lead">Verbinde jeden Account, auf den du Zugriff hast, ${
       mode === "apikey" ? "mit deinem persönlichen easybill-API-Key" : "mit deinem eigenen easybill-Login"
     }.
     Accounts ohne Zugriff lässt du einfach aus – du kannst sie später ergänzen.</p>
     ${viewer ? `<p class="status" style="margin:-16px 0 20px">Angemeldet als ${escape(viewer)}</p>` : ""}
     ${banners}
-    <div class="card">${tenants.map((t) => tenantRow(session.id, t, byTenant.get(t.id), mode)).join("")}</div>
+    <div class="card">${tenants.map((t) => tenantRow(session.id, t, byTenant.get(t.id), mode, csrfToken)).join("")}</div>
     ${footer}
     <details><summary>Hinweise</summary>${
       mode === "apikey"
@@ -144,7 +190,7 @@ export function renderConnectPage({ mode, viewer, session, tenants, connections,
   );
 }
 
-export function renderKeyForm(session: SessionRow, tenant: TenantConfig, error?: string): string {
+export function renderKeyForm(session: SessionRow, tenant: TenantConfig, csrfToken: string, error?: string): string {
   const sid = encodeURIComponent(session.id);
   const action = `/connect/${sid}/tenants/${encodeURIComponent(tenant.id)}/key`;
   return layout(
@@ -160,6 +206,7 @@ export function renderKeyForm(session: SessionRow, tenant: TenantConfig, error?:
           Gibt es noch keinen: <b>Neuen Schlüssel generieren</b> und rechts oben <b>Speichern</b>.</li>
       </ol>
       <form method="post" action="${action}">
+        ${csrfField(csrfToken)}
         <label for="api_key" style="display:block; font-weight:600; margin-bottom:6px">API-Key</label>
         <input id="api_key" name="api_key" type="password" required autocomplete="off" spellcheck="false"
           style="width:100%; font:inherit; padding:8px 10px; border:1px solid var(--line); border-radius:7px; background:var(--bg); color:var(--text)">

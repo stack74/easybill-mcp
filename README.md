@@ -272,8 +272,10 @@ creates a git tag. npm does not allow republishing an existing version.
 `easybill-mcp --http` runs the server as a remote MCP endpoint (Streamable HTTP) for a whole
 company:
 
-1. Someone adds the connector in claude.ai (or any OAuth-capable MCP client).
-2. The client opens this server's **connect page**. It lists the easybill accounts from your
+1. Someone adds the connector in claude.ai (or any OAuth-capable MCP client). Only known redirect
+   URIs may register (see [Security](#security-hosted-mode)).
+2. The client opens this server's **connect page**. It names the app that asks and where the
+   access will go, and lists the easybill accounts from your
    tenant configuration; the person clicks *Verbinden* on each account they have access to and
    pastes **their personal easybill API key** (easybill: user icon → *Profil und Einstellungen*
    → *API Key*). The server checks it against easybill before storing it.
@@ -326,6 +328,8 @@ redirect URIs (claude.ai and similar), so this mode needs an OAuth client issued
 | `PORT` / `HOST` | `3000` / `0.0.0.0` | Listen address. |
 | `EASYBILL_CF_ACCESS_TEAM_DOMAIN` / `EASYBILL_CF_ACCESS_AUD` | — | Put the connect pages behind Cloudflare Access: team domain (e.g. `acme` or `acme.cloudflareaccess.com`) and the Access application's AUD tag. `/connect/*` then requires a valid Access token, checked by the server itself. |
 | `EASYBILL_ICON_PATH` | — | Path to an `.svg`, `.png` or `.ico` file (e.g. a file mount in your hosting platform). Served as `/favicon.ico` and `/favicon.<ext>`, linked from the pages and announced as the MCP server icon. claude.ai shows the domain's favicon next to a custom connector. |
+| `EASYBILL_ALLOWED_REDIRECT_URIS` | — | Comma-separated redirect URIs MCP clients may register, **in addition to** the built-in ones (`https://claude.ai/api/mcp/auth_callback`, `https://claude.com/api/mcp/auth_callback`, `http://localhost:*`, `http://127.0.0.1:*`, `http://[::1]:*`). `:*` matches any port; a pattern without a path matches any path on that origin. |
+| `EASYBILL_DEFAULT_REDIRECT_URIS` | `true` | `false` drops the built-in redirect URIs, so only `EASYBILL_ALLOWED_REDIRECT_URIS` are allowed (the server refuses to start if that leaves none). |
 | `EASYBILL_CONNECT_MODE` | `apikey` (`oauth` if a client ID is set) | How people connect easybill accounts. |
 | `EASYBILL_OAUTH_CLIENT_ID` / `_SECRET` | — | OAuth mode: the client easybill issued for this server. |
 | `EASYBILL_OAUTH_ISSUER` | `https://api.easybill.de` | OAuth mode: easybill's OAuth issuer. |
@@ -354,6 +358,29 @@ Cloudflare (e.g. via the origin IP).
 Run it behind TLS (reverse proxy). Then in claude.ai: *Settings → Connectors → Add custom
 connector* with `https://easybill-mcp.example.com/mcp` (organization admins can add it once for
 everyone; each person still connects their own easybill logins).
+
+### Security (hosted mode)
+
+The server hands out access to easybill accounts with the rights of whoever connects them, so it
+guards against the "confused deputy" attack from the MCP security best practices: someone registers
+their own client with their own redirect URI, starts the authorization and sends a colleague the
+resulting connect link. The colleague connects their easybill accounts, presses *Fertig* — and the
+authorization code would go to the attacker. Two independent checks prevent that:
+
+- **Redirect allowlist.** Dynamic client registration only accepts known redirect URIs
+  (`invalid_redirect_uri` otherwise); `/authorize` checks again and answers with an error page
+  instead of redirecting, so narrowing the list also locks out clients registered earlier.
+  Loopback addresses are allowed because a code sent there can only reach the connecting person's
+  own machine.
+- **The connect page is the consent step.** At the top it names the app (its self-declared, unverified
+  name) and, more importantly, the address the access goes to, with the advice to cancel if the
+  person did not start the connection in Claude themselves. Every form on the page (connect, API key,
+  disconnect, finish, cancel) carries a CSRF token that must match an `HttpOnly`, `SameSite=Strict`
+  cookie scoped to that connect link, so another site cannot submit the forms in the person's
+  browser even though the link itself may be known.
+
+Other measures: easybill tokens and API keys are stored AES-GCM encrypted; the connect pages send a
+strict CSP and cannot be framed; optionally they sit behind Cloudflare Access.
 
 ## Configuration
 

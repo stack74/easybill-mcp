@@ -11,6 +11,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { createRemoteJWKSet, jwtVerify } from "jose";
@@ -249,6 +250,72 @@ export async function createHostedApp(config: HostedConfig): Promise<HostedApp> 
     return session;
   };
 
+  // --- CSRF ------------------------------------------------------------------
+  //
+  // Whoever has a connect link knows its session id, so a foreign page could
+  // otherwise submit the connect page's forms (connect, key, disconnect, finish,
+  // cancel) in the person's browser. Every page of a session sets a
+  // SameSite=Strict cookie and puts the same token into each form; a POST must
+  // carry both. A cross-site form post never carries the Strict cookie. The token
+  // is derived from the session id with the server secret, so it needs no storage.
+
+  const CSRF_COOKIE = "easybill_mcp_csrf";
+  const csrfToken = (sid: string): string => createHmac("sha256", config.secret).update(`csrf:${sid}`).digest("base64url");
+  const csrfCookiePath = (sid: string): string => `/connect/${encodeURIComponent(sid)}`;
+
+  const readCookie = (req: Request, name: string): string | undefined => {
+    for (const part of (req.headers.cookie ?? "").split(";")) {
+      const [key, ...rest] = part.trim().split("=");
+      if (key !== name) continue;
+      try {
+        return decodeURIComponent(rest.join("="));
+      } catch {
+        return undefined;
+      }
+    }
+    return undefined;
+  };
+  const sameToken = (a: string, b: string): boolean => {
+    const x = Buffer.from(a);
+    const y = Buffer.from(b);
+    return x.length === y.length && timingSafeEqual(x, y);
+  };
+
+  /** Sets the CSRF cookie for a session's pages and returns the token for the forms. */
+  const issueCsrf = (res: Response, session: SessionRow): string => {
+    const token = csrfToken(session.id);
+    res.cookie(CSRF_COOKIE, token, {
+      httpOnly: true,
+      secure: config.publicUrl.protocol === "https:",
+      sameSite: "strict",
+      path: csrfCookiePath(session.id),
+      maxAge: SESSION_TTL_SECONDS * 1000,
+    });
+    return token;
+  };
+
+  const formBody = express.urlencoded({ extended: false, limit: "4kb" });
+
+  /** For every POST under /connect/:sid/…: cookie, form field and expected token must agree. */
+  const requireCsrf = (req: Request, res: Response, next: NextFunction): void => {
+    const expected = csrfToken(String(req.params.sid));
+    const field = typeof req.body?.csrf === "string" ? req.body.csrf : "";
+    const cookieValue = readCookie(req, CSRF_COOKIE) ?? "";
+    if (sameToken(field, expected) && sameToken(cookieValue, expected)) return next();
+    console.error(`Connect page: ${req.method} ${req.path.replace(/^\/connect\/[^/]+/, "/connect/…")} refused, CSRF token missing or wrong`);
+    pageHeaders(res);
+    res
+      .status(403)
+      .type("html")
+      .send(
+        renderMessage(
+          "Nicht bestätigt",
+          "Diese Aktion konnte nicht bestätigt werden. Öffne die Verbindungsseite erneut (Cookies müssen erlaubt sein) " +
+            "oder starte die Verbindung in Claude neu.",
+        ),
+      );
+  };
+
   const backToPage = (res: Response, session: SessionRow, kind: "e" | "n", code: string, tenantId?: string): void => {
     const params = new URLSearchParams({ [kind]: code, ...(tenantId ? { t: tenantId } : {}) });
     res.redirect(303, `/connect/${encodeURIComponent(session.id)}?${params}`);
@@ -309,12 +376,21 @@ export async function createHostedApp(config: HostedConfig): Promise<HostedApp> 
       typeof key === "string" && MESSAGES[key] ? MESSAGES[key](tenant) : undefined;
     const error = message(req.query.e);
     const notice = message(req.query.n);
+    const csrf = issueCsrf(res, session);
+    // Which app asks and where the access goes: the person must see this before
+    // connecting anything, the link may come from someone else.
+    const client =
+      session.kind === "authorize" && session.client_id && session.redirect_uri
+        ? { name: store.getClient(session.client_id)?.client_name, redirectUri: session.redirect_uri }
+        : undefined;
     pageHeaders(res);
     res.type("html").send(
       renderConnectPage({
         mode: config.connectMode,
         ...(viewerOf(res) ? { viewer: viewerOf(res)! } : {}),
         session,
+        csrfToken: csrf,
+        ...(client ? { client } : {}),
         tenants,
         connections: store.listConnections(session.grant_id),
         ...(error ? { error } : {}),
@@ -323,7 +399,7 @@ export async function createHostedApp(config: HostedConfig): Promise<HostedApp> 
     );
   });
 
-  app.post("/connect/:sid/tenants/:tid/connect", (req, res) => {
+  app.post("/connect/:sid/tenants/:tid/connect", formBody, requireCsrf, (req, res) => {
     const session = loadSession(req, res);
     if (!session) return;
     const tenant = tenantById.get(String(req.params.tid));
@@ -340,18 +416,19 @@ export async function createHostedApp(config: HostedConfig): Promise<HostedApp> 
     if (!session) return;
     const tenant = tenantById.get(String(req.params.tid));
     if (!tenant || config.connectMode !== "apikey") return expired(res);
+    const csrf = issueCsrf(res, session);
     pageHeaders(res);
-    res.type("html").send(renderKeyForm(session, tenant));
+    res.type("html").send(renderKeyForm(session, tenant, csrf));
   });
 
-  app.post("/connect/:sid/tenants/:tid/key", express.urlencoded({ extended: false, limit: "4kb" }), async (req, res) => {
+  app.post("/connect/:sid/tenants/:tid/key", formBody, requireCsrf, async (req, res) => {
     const session = loadSession(req, res);
     if (!session) return;
     const tenant = tenantById.get(String(req.params.tid));
     if (!tenant || config.connectMode !== "apikey") return expired(res);
     const fail = (message: string): void => {
       pageHeaders(res);
-      res.status(400).type("html").send(renderKeyForm(session, tenant, message));
+      res.status(400).type("html").send(renderKeyForm(session, tenant, csrfToken(session.id), message));
     };
 
     const key = typeof req.body?.api_key === "string" ? req.body.api_key.trim() : "";
@@ -408,7 +485,7 @@ export async function createHostedApp(config: HostedConfig): Promise<HostedApp> 
     backToPage(res, session, "n", "connected", tenant.id);
   });
 
-  app.post("/connect/:sid/tenants/:tid/disconnect", (req, res) => {
+  app.post("/connect/:sid/tenants/:tid/disconnect", formBody, requireCsrf, (req, res) => {
     const session = loadSession(req, res);
     if (!session) return;
     const tenantId = String(req.params.tid);
@@ -416,7 +493,7 @@ export async function createHostedApp(config: HostedConfig): Promise<HostedApp> 
     backToPage(res, session, "n", "disconnected", tenantId);
   });
 
-  app.post("/connect/:sid/finish", (req, res) => {
+  app.post("/connect/:sid/finish", formBody, requireCsrf, (req, res) => {
     const session = loadSession(req, res);
     if (!session) return;
     if (session.kind === "manage") {
@@ -435,7 +512,7 @@ export async function createHostedApp(config: HostedConfig): Promise<HostedApp> 
     res.redirect(303, provider.completeAuthorization(session));
   });
 
-  app.post("/connect/:sid/cancel", (req, res) => {
+  app.post("/connect/:sid/cancel", formBody, requireCsrf, (req, res) => {
     const session = loadSession(req, res);
     if (!session) return;
     if (session.kind !== "authorize") return expired(res);
